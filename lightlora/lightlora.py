@@ -207,7 +207,9 @@ class LightLoRACollection(object):
 class LightLoRACollection_wpuv(object):
     def __init__(self):
         self.forward = {1: self.forward1}
+        self.forward_flops = {1: self.forward1_flops}
         self.backward = {1: self.backward1, 2: self.backward2}
+        self.backward_flops = {1: self.backward1_flops, 2: self.backward2_flops}
 
     @staticmethod
     @custom_fwd
@@ -216,6 +218,15 @@ class LightLoRACollection_wpuv(object):
         Z = W.addmm(U, V)
         ctx.save_for_backward(input, W, U, V, Z)
         return input.mm(Z)
+
+    @staticmethod
+    def forward1_flops(input, W, U, V):
+        nflops = 0
+        # W .addmm (U, V)
+        nflops += 2 * U.shape[0] * U.shape[1] * V.shape[1]
+        # input .mm (Z)
+        nflops += 2 * prod(input.shape) * W.shape[1]
+        return nflops
 
     @staticmethod
     @custom_bwd
@@ -230,6 +241,19 @@ class LightLoRACollection_wpuv(object):
         return grad_input, grad_W, grad_U, grad_V
 
     @staticmethod
+    def backward1_flops(input, W, U, V):
+        nflops = 0
+        # input.t() .mm (grad_output)
+        nflops += 2 * prod(input.shape) * W.shape[1]
+        # Z .mm (V.t())
+        nflops += 2 * W.shape[0] * V.shape[1] * V.shape[0]
+        # (U.t()) .mm (Z)
+        nflops += 2 * U.shape[1] * U.shape[0] * W.shape[1]
+        # grad_output .mm ((W.addmm(U, V)).t())
+        nflops += 2 * prod(input.shape) * W.shape[1]
+        return nflops
+
+    @staticmethod
     @custom_bwd
     def backward2(ctx, grad_output):
         """load(X,W,U,V,WpUV) dU=X'(dYV') dV=(XU)'dY dX=dY(W+UV)'"""
@@ -240,16 +264,36 @@ class LightLoRACollection_wpuv(object):
         grad_W = None
         return grad_input, grad_W, grad_U, grad_V
 
+    @staticmethod
+    def backward2_flops(input, W, U, V):
+        nflops = 0
+        # grad_output .mm (V.t())
+        nflops += 2 * prod(input.shape[:-1]) * V.shape[1] * V.shape[0]
+        # input.t() .mm (grad_output.mm(V.t()))
+        nflops += 2 * prod(input.shape) * V.shape[0]
+        # input .mm (U)
+        nflops += 2 * prod(input.shape) * U.shape[1]
+        # (input.mm(U)).t() .mm (grad_output)
+        nflops += 2 * prod(input.shape[:-1]) * U.shape[1] * W.shape[1]
+        # grad_output .mm ((W.addmm(U, V)).t())
+        nflops += 2 * prod(input.shape) * W.shape[1]
+        return nflops
+
     def __call__(self, path_f, path_b):
         class LightLoRA_wpuv(torch.autograd.Function):
             forward = self.forward[path_f]
             backward = self.backward[path_b]
+            def flops(input, W, U, V):
+                return self.forward_flops[path_f](input, W, U, V) \
+                    + self.backward_flops[path_b](input, W, U, V)
         return LightLoRA_wpuv
 
 class LightLoRACollection_xu(object):
     def __init__(self):
         self.forward = {1: self.forward1}
+        self.forward_flops = {1: self.forward1_flops}
         self.backward = {1: self.backward1}
+        self.backward_flops = {1: self.backward1_flops}
 
     @staticmethod
     @custom_fwd
@@ -258,6 +302,17 @@ class LightLoRACollection_xu(object):
         Z = input.mm(U)
         ctx.save_for_backward(input, W, U, V, Z)
         return input.mm(W).addmm_(input.mm(U), V)
+
+    @staticmethod
+    def forward1_flops(input, W, U, V):
+        nflops = 0
+        # input .mm (U)
+        nflops += 2 * prod(input.shape) * U.shape[1]
+        # input .mm (W)
+        nflops += 2 * prod(input.shape) * W.shape[1]
+        # (input.mm(W)) .addmm_ (input.mm(U), V)
+        nflops += 2 * prod(input.shape[:-1]) * U.shape[1] * V.shape[1]
+        return nflops
 
     @staticmethod
     @custom_bwd
@@ -271,9 +326,27 @@ class LightLoRACollection_xu(object):
         grad_W = None
         return grad_input, grad_W, grad_U, grad_V
 
+    @staticmethod
+    def backward1_flops(input, W, U, V):
+        nflops = 0
+        # grad_output .mm (V.t())
+        nflops += 2 * prod(input.shape[:-1]) * V.shape[1] * V.shape[0]
+        # input.t() .mm (Z)
+        nflops += 2 * prod(input.shape) * V.shape[0]
+        # XU.t() .mm (grad_output)
+        nflops += 2 * U.shape[1] * prod(input.shape[:-1]) * W.shape[1]
+        # grad_output .mm (W.t())
+        nflops += 2 * prod(input.shape) * W.shape[1]
+        # grad_output.mm(W.t()) .addmm_ (Z, U.t())
+        nflops += 2 * prod(input.shape) * V.shape[0]
+        return nflops
+
     def __call__(self, path_f, path_b):
         class LightLoRA_xu(torch.autograd.Function):
             forward = self.forward[path_f]
             backward = self.backward[path_b]
+            def flops(input, W, U, V):
+                return self.forward_flops[path_f](input, W, U, V) \
+                    + self.backward_flops[path_b](input, W, U, V)
         return LightLoRA_xu
 
