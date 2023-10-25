@@ -6,7 +6,8 @@ import torch.utils.benchmark as benchmark
 from argparse import ArgumentParser
 
 parser = ArgumentParser(prog="Parameters for LightLora")
-parser.add_argument("--n_batch", type=int, default=4096)
+parser.add_argument("--n_batch", type=int, default=1)
+parser.add_argument("--n_seq", type=int, default=4096)
 parser.add_argument("--n_in", type=int, default=1024)
 parser.add_argument("--n_out", type=int, default=1024)
 parser.add_argument("--n_rank", type=int, default=32)
@@ -23,7 +24,8 @@ def mytimeit(statement, nflops):
     torch.cuda.reset_peak_memory_stats()
     b = benchmark.Timer(stmt=statement, globals={'w': w, 'x': x, 'u': u, \
             'v': v, 'light_lora': light_lora, 'torch': torch})
-    measure = b.blocked_autorange()
+    measure_warmup = b.blocked_autorange(min_run_time=1.0)
+    measure = b.blocked_autorange(min_run_time=1.0)
     print("Evaluating \"{}\"".format(statement))
     print("Mean time: {} us".format(measure.mean * 1000000))
     print("GFlops: {}".format(nflops*1e-9))
@@ -42,7 +44,7 @@ else:
 
 w = torch.nn.Parameter(torch.randn(args.n_in, args.n_out, device=device, \
     dtype=dtype), requires_grad=True)
-x = torch.randn(args.n_batch, args.n_in, device=device, dtype=dtype, \
+x = torch.randn(args.n_batch, args.n_seq, args.n_in, device=device, dtype=dtype, \
         requires_grad=True)
 u = torch.randn(args.n_in, args.n_rank, device=device, dtype=dtype, \
         requires_grad=True)
@@ -96,4 +98,20 @@ for i in range(1, 2):
         print("Flops/linear: {}".format(light_lora.flops(x, w, u, v) \
                 / (6*prod(x.shape)*w.shape[1])))
         print()
+
+# Repeat Standard tests to see avoid boosted MHz
+w.requires_grad = True
+light_lora = None
+mytimeit("(x@w).sum().backward()", 6*prod(x.shape)*w.shape[1])
+print("Flops/linear: 1.0")
+print()
+
+# Now W shall not accumulate gradient any more
+w.requires_grad = False
+
+mytimeit("(x@w+(x@u)@v).sum().backward()", 0)
+print()
+
+mytimeit("(x@(w+u@v)).sum().backward()", 0)
+print()
 

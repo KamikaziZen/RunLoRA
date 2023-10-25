@@ -4,7 +4,7 @@ from copy import deepcopy
 
 device = torch.device("cuda")
 w = torch.nn.Parameter(torch.randn(1024, 1024, device=device), requires_grad=False)
-x = torch.randn(4096, 1024, device=device, requires_grad=True)
+x = torch.randn(4, 1024, 1024, device=device, requires_grad=True)
 u = torch.randn(1024, 128, device=device, requires_grad=True)
 v = torch.randn(128, 1024, device=device, requires_grad=True)
 y = x@w + (x@u)@v
