@@ -4,6 +4,8 @@ from copy import deepcopy
 from time import time
 import torch.utils.benchmark as benchmark
 from argparse import ArgumentParser
+import pandas as pd
+
 
 parser = ArgumentParser(prog="Parameters for LightLora")
 parser.add_argument("--n_batch", type=int, default=1)
@@ -12,8 +14,10 @@ parser.add_argument("--n_in", type=int, default=1024)
 parser.add_argument("--n_out", type=int, default=1024)
 parser.add_argument("--n_rank", type=int, default=32)
 parser.add_argument("--dtype", default="float")
+parser.add_argument('-o', "--out", type=str, default='out')
 
 args = parser.parse_args()
+rows = []
 
 def mytimeit(statement, nflops):
     w.grad = None
@@ -31,6 +35,10 @@ def mytimeit(statement, nflops):
     print("GFlops: {}".format(nflops*1e-9))
     print("GFlops/s: {}".format(nflops*1e-9 / measure.mean))
     print("Max mem: {} MB".format(torch.cuda.max_memory_allocated()/2**20))
+    return {'mean_time': measure.mean * 1000000,
+            'Gflops': nflops * 1e-9, 
+            'Gflops/s': nflops * 1e-9 / measure.mean,
+            'max_mem_MB': torch.cuda.max_memory_allocated() / 2**20}
 
 device = torch.device("cuda")
 if args.dtype == "float" or args.dtype == "fp32":
@@ -73,45 +81,77 @@ for i in range(1, 3):
     for j in range(1, 6):
         print("path_f={} path_b={}".format(i, j))
         light_lora = LightLoRACollection()(i, j)
-        mytimeit("light_lora.apply(x, w, u, v).sum().backward()", \
-                light_lora.flops(x, w, u, v))
-        print("Flops/linear: {}".format(light_lora.flops(x, w, u, v) \
-                / (6*prod(x.shape)*w.shape[1])))
+        flops = light_lora.flops(x, w, u, v)
+        flops_linear = flops / (6*prod(x.shape)*w.shape[1])
+        timestats = mytimeit("light_lora.apply(x, w, u, v).sum().backward()", 
+                             flops)
+        print("Flops/linear: {}".format(flops_linear))
         print()
+
+        rows.append({'path_f': i, 'path_b': j, 
+                     'note': light_lora.__name__,
+                     'flops': flops, 'flops/linear': flops_linear,
+                     **vars(args), **timestats})
 
 for i in range(1, 2):
     for j in range(1, 3):
         print("wpuv path_f={} path_b={}".format(i, j))
         light_lora = LightLoRACollection_wpuv()(i, j)
-        mytimeit("light_lora.apply(x, w, u, v).sum().backward()", \
-                light_lora.flops(x, w, u, v))
-        print("Flops/linear: {}".format(light_lora.flops(x, w, u, v) \
-                / (6*prod(x.shape)*w.shape[1])))
+        flops = light_lora.flops(x, w, u, v)
+        flops_linear = flops / (6*prod(x.shape)*w.shape[1])
+        timestats = mytimeit("light_lora.apply(x, w, u, v).sum().backward()", 
+                             flops)
+        print("Flops/linear: {}".format(flops_linear))
         print()
+
+        rows.append({'path_f': i, 'path_b': j, 
+                     'note': light_lora.__name__,
+                     'flops': flops, 'flops/linear': flops_linear,
+                     **vars(args), **timestats})
 
 for i in range(1, 2):
     for j in range(1, 2):
         print("xu path_f={} path_b={}".format(i, j))
         light_lora = LightLoRACollection_xu()(i, j)
-        mytimeit("light_lora.apply(x, w, u, v).sum().backward()", \
-                light_lora.flops(x, w, u, v))
-        print("Flops/linear: {}".format(light_lora.flops(x, w, u, v) \
-                / (6*prod(x.shape)*w.shape[1])))
+        flops = light_lora.flops(x, w, u, v)
+        flops_linear = flops / (6*prod(x.shape)*w.shape[1])
+        timestats = mytimeit("light_lora.apply(x, w, u, v).sum().backward()", 
+                             flops)
+        print("Flops/linear: {}".format(flops_linear))
         print()
+
+        rows.append({'path_f': i, 'path_b': j, 
+                     'note': light_lora.__name__,
+                     'flops': flops, 'flops/linear': flops_linear,
+                     **vars(args), **timestats})
 
 # Repeat Standard tests to see avoid boosted MHz
 w.requires_grad = True
 light_lora = None
-mytimeit("(x@w).sum().backward()", 6*prod(x.shape)*w.shape[1])
+timestats = mytimeit("(x@w).sum().backward()", 6*prod(x.shape)*w.shape[1])
 print("Flops/linear: 1.0")
 print()
+rows.append({'note': 'x@w',
+             'flops/linear': 1.0,
+             **vars(args), **timestats})
 
 # Now W shall not accumulate gradient any more
 w.requires_grad = False
 
-mytimeit("(x@w+(x@u)@v).sum().backward()", 0)
+timestats = mytimeit("(x@w+(x@u)@v).sum().backward()", 0)
 print()
+rows.append({'note': 'x@w+(x@u)@v',
+             **vars(args), **timestats})
 
-mytimeit("(x@(w+u@v)).sum().backward()", 0)
+timestats = mytimeit("(x@(w+u@v)).sum().backward()", 0)
 print()
+rows.append({'note': 'x@(w+u@v)',
+             **vars(args), **timestats})
+
+df = pd.DataFrame.from_records(rows)
+df.sort_values(['mean_time', 'max_mem_MB'], 
+               ascending = [True, True], 
+               inplace=True)
+df.to_csv(args.out)
+print(df)
 
