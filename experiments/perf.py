@@ -24,12 +24,12 @@ def mytimeit(statement, nflops):
     x.grad = None
     u.grad = None
     v.grad = None
-    b = benchmark.Timer(stmt=statement, globals={'w': w, 'x': x, 'u': u, \
-            'v': v, 'light_lora': light_lora, 'torch': torch})
-    measure_warmup = b.blocked_autorange(min_run_time=1.0)
+    bench = benchmark.Timer(stmt=statement, globals={'w': w, 'x': x, 'u': u, \
+            'v': v, 'b': b, 'light_lora': light_lora, 'torch': torch})
+    measure_warmup = bench.blocked_autorange(min_run_time=1.0)
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats()
-    measure = b.blocked_autorange(min_run_time=1.0)
+    measure = bench.blocked_autorange(min_run_time=1.0)
     print("Evaluating \"{}\"".format(statement))
     print("Mean time: {} us".format(measure.mean * 1000000))
     print("GFlops: {}".format(nflops*1e-9))
@@ -45,9 +45,9 @@ def mytimeit_lightlora(path_f, path_b):
     global light_lora
     light_lora = lora_collection[path_f, path_b]
     #light_lora.apply = torch.compile(light_lora.apply)
-    flops = light_lora.flops(x, w, u, v)
+    flops = light_lora.flops(x, w, u, v, b)
     flops_linear = flops / baseline_nflops
-    timestats = mytimeit("light_lora.apply(x, w, u, v).sum().backward()", 
+    timestats = mytimeit("light_lora.apply(x, w, u, v, b).sum().backward()", 
                          flops)
     print("Flops/linear: {}".format(flops_linear))
     print()
@@ -75,9 +75,10 @@ x_req_grad = (args.x_req_grad == "True")
 x = torch.randn(args.n_batch, args.n_seq, args.n_in, requires_grad=x_req_grad)
 u = torch.randn(args.n_in, args.n_rank, requires_grad=True)
 v = torch.randn(args.n_rank, args.n_out, requires_grad=True)
+b = torch.randn(args.n_out, requires_grad=True)
 
-print("x.shape={} w.shape={} u.shape={} v.shape={}".format( \
-    x.shape, w.shape, u.shape, v.shape))
+print("x.shape={} w.shape={} u.shape={} v.shape={} b.shape={}".format( \
+    x.shape, w.shape, u.shape, v.shape, b.shape))
 print()
 
 light_lora = None
@@ -86,24 +87,24 @@ if x.requires_grad:
 else:
     baseline_nflops = 4 * prod(x.shape) * w.shape[1]
 
-timestats = mytimeit("(x@w).sum().backward()", baseline_nflops)
+timestats = mytimeit("(x@w+b).sum().backward()", baseline_nflops)
 print("Flops/linear: 1.0")
 print()
-rows.append({'note': 'x@w',
+rows.append({'note': 'x@w+b',
              'flops/linear': 1.0,
              **vars(args), **timestats})
 
 # Now W shall not accumulate gradient any more
 w.requires_grad = False
 
-timestats = mytimeit("(x@w+(x@u)@v).sum().backward()", 0)
+timestats = mytimeit("(x@w+(x@u)@v+b).sum().backward()", 0)
 print()
-rows.append({'note': 'x@w+(x@u)@v',
+rows.append({'note': 'x@w+(x@u)@v+b',
              **vars(args), **timestats})
 
-timestats = mytimeit("(x@(w+u@v)).sum().backward()", 0)
+timestats = mytimeit("(x@(w+u@v)+b).sum().backward()", 0)
 print()
-rows.append({'note': 'x@(w+u@v)',
+rows.append({'note': 'x@(w+u@v)+b',
              **vars(args), **timestats})
 
 # Find the fastest forward+backward
