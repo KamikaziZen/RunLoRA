@@ -11,45 +11,33 @@ y = x@w + (x@u)@v
 loss = y.sum()
 loss.backward()
 x_grad, u_grad, v_grad = deepcopy(x.grad), deepcopy(u.grad), deepcopy(v.grad)
+lora_collection = LightLoRACollection()
 
-for i in range(1, 3):
-    for j in range(1, 6):
-        x.grad, u.grad, v.grad = None, None, None
-        print("path_f={} path_b={}".format(i, j))
-        light_lora = LightLoRACollection()(i, j).apply
-        y1 = light_lora(x, w, u, v)
-        loss = y1.sum()
-        print(torch.norm(y1-y) / torch.norm(y))
-        loss.backward()
-        print(torch.norm(x_grad-x.grad) / torch.norm(x_grad))
-        print(torch.norm(u_grad-u.grad) / torch.norm(u_grad))
-        print(torch.norm(v_grad-v.grad) / torch.norm(v_grad))
-        print()
+path_f = lora_collection.forward_keys[0]
+for path_b in lora_collection.backward_keys:
+    x.grad, u.grad, v.grad = None, None, None
+    print("path_f={} path_b={}".format(path_f, path_b))
+    light_lora = lora_collection[path_f, path_b].apply
+    y1 = light_lora(x, w, u, v)
+    loss = y1.sum()
+    print(torch.norm(y1-y) / torch.norm(y))
+    loss.backward()
+    print(torch.norm(x_grad-x.grad) / torch.norm(x_grad))
+    print(torch.norm(u_grad-u.grad) / torch.norm(u_grad))
+    print(torch.norm(v_grad-v.grad) / torch.norm(v_grad))
+    print()
 
-for i in range(1, 2):
-    for j in range(1, 3):
-        x.grad, u.grad, v.grad = None, None, None
-        print("wpuv path_f={} path_b={}".format(i, j))
-        light_lora = LightLoRACollection_wpuv()(i, j).apply
-        y1 = light_lora(x, w, u, v)
-        loss = y1.sum()
-        print(torch.norm(y1-y) / torch.norm(y))
-        loss.backward()
-        print(torch.norm(x_grad-x.grad) / torch.norm(x_grad))
-        print(torch.norm(u_grad-u.grad) / torch.norm(u_grad))
-        print(torch.norm(v_grad-v.grad) / torch.norm(v_grad))
-        print()
+path_b = lora_collection.backward_keys[0]
+for path_f in lora_collection.forward_keys[1:]:
+    x.grad, u.grad, v.grad = None, None, None
+    print("path_f={} path_b={}".format(path_f, path_b))
+    light_lora = lora_collection[path_f, path_b].apply
+    y1 = light_lora(x, w, u, v)
+    loss = y1.sum()
+    print(torch.norm(y1-y) / torch.norm(y))
+    loss.backward()
+    print(torch.norm(x_grad-x.grad) / torch.norm(x_grad))
+    print(torch.norm(u_grad-u.grad) / torch.norm(u_grad))
+    print(torch.norm(v_grad-v.grad) / torch.norm(v_grad))
+    print()
 
-for i in range(1, 2):
-    for j in range(1, 2):
-        x.grad, u.grad, v.grad = None, None, None
-        print("xu path_f={} path_b={}".format(i, j))
-        light_lora = LightLoRACollection_xu()(i, j).apply
-        y1 = light_lora(x, w, u, v)
-        loss = y1.sum()
-        print(torch.norm(y1-y) / torch.norm(y))
-        loss.backward()
-        print(torch.norm(x_grad-x.grad) / torch.norm(x_grad))
-        print(torch.norm(u_grad-u.grad) / torch.norm(u_grad))
-        print(torch.norm(v_grad-v.grad) / torch.norm(v_grad))
-        print()
