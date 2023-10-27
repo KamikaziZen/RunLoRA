@@ -14,6 +14,7 @@ parser.add_argument("--n_layer", type=int, default=1)
 parser.add_argument("--n_in", type=int, default=1024)
 parser.add_argument("--n_out", type=int, default=1024)
 parser.add_argument("--n_rank", type=int, default=32)
+parser.add_argument("--ignore_linear", action="store_true")
 parser.add_argument("--dtype", default="float")
 parser.add_argument('-o', "--out", type=str, default='out')
 
@@ -128,14 +129,15 @@ torch.set_default_dtype(dtype)
 x = torch.randn(args.n_batch, args.n_seq, args.n_in, requires_grad=False)
 y = torch.randn(args.n_batch, args.n_seq, args.n_out, requires_grad=False)
 
-baseline_nflops = (args.n_layer*12-2) * args.n_batch * args.n_seq * args.n_in \
-        * args.n_out
-mlp = MLPLinear(args.n_layer, args.n_in, args.n_out)
-timestats = mytimeit("MLPLinear", baseline_nflops)
-print("Flops/linear: 1.0")
-print()
-rows.append({'note': 'MLPLinear', 'flops/linear': 1.0, **vars(args), \
-        **timestats})
+if not args.ignore_linear:
+    baseline_nflops = (args.n_layer*12-2) * args.n_batch * args.n_seq * args.n_in \
+            * args.n_out
+    mlp = MLPLinear(args.n_layer, args.n_in, args.n_out)
+    timestats = mytimeit("MLPLinear", baseline_nflops)
+    print("Flops/linear: 1.0")
+    print()
+    rows.append({'note': 'MLPLinear', 'flops/linear': 1.0, **vars(args), \
+            **timestats})
 
 mlp = MLPLoRA(args.n_layer, args.n_in, args.n_out, args.n_rank)
 timestats = mytimeit("MLPLoRA", 0)
@@ -159,4 +161,6 @@ df.sort_values(['mean_time', 'max_mem_MB'],
 df.to_csv(args.out)
 print(df.drop(columns=["n_batch", "n_seq", "n_layer", "n_in", "n_out", \
         "n_rank", "dtype"]))
-
+print()
+print("Best fwd and bwd")
+print(light_lora_collection.benchmarks_short)

@@ -26,8 +26,8 @@ def timeit_lightlora(paths_f, paths_b, X, W, U, V, B):
         globals_ = {'light_lora': light_lora, 'x': x, 'w': w, 'u': u, 'v': v, \
                 'b': b}
         bench = benchmark.Timer(stmt=statement, globals=globals_)
-        measure_warmup = bench.blocked_autorange(min_run_time=0.1)
-        measure = bench.blocked_autorange(min_run_time=0.2)
+        measure_warmup = bench.blocked_autorange(min_run_time=1)
+        measure = bench.blocked_autorange(min_run_time=5)
         if best_path_time > measure.mean:
             best_path_time = measure.mean
             best_path_f = path_f
@@ -44,8 +44,8 @@ def timeit_lightlora(paths_f, paths_b, X, W, U, V, B):
         loss = light_lora.apply(x, w, u, v, b).sum().requires_grad_(True)
         globals_ = {'loss': loss}
         bench = benchmark.Timer(stmt=statement, globals=globals_)
-        measure_warmup = bench.blocked_autorange(min_run_time=0.1)
-        measure = bench.blocked_autorange(min_run_time=0.2)
+        measure_warmup = bench.blocked_autorange(min_run_time=1)
+        measure = bench.blocked_autorange(min_run_time=5)
         if best_path_time > measure.mean:
             best_path_time = measure.mean
             best_path_b = path_b
