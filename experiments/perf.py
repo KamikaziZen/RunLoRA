@@ -12,7 +12,11 @@ parser.add_argument("--n_seq", type=int, default=4096)
 parser.add_argument("--n_in", type=int, default=1024)
 parser.add_argument("--n_out", type=int, default=1024)
 parser.add_argument("--n_rank", type=int, default=32)
+parser.add_argument("--b_is_None", choices=["True", "False"], default="True")
 parser.add_argument("--x_req_grad", choices=["True", "False"], default="True")
+parser.add_argument("--u_req_grad", choices=["True", "False"], default="True")
+parser.add_argument("--v_req_grad", choices=["True", "False"], default="True")
+parser.add_argument("--b_req_grad", choices=["True", "False"], default="True")
 parser.add_argument("--dtype", default="float")
 parser.add_argument('-o', "--out", type=str, default='out')
 
@@ -43,7 +47,7 @@ def mytimeit(statement, nflops):
 def mytimeit_lightlora(path_f, path_b):
     print("path_f={} path_b={}".format(path_f, path_b))
     global light_lora
-    light_lora = lora_collection[path_f, path_b]
+    light_lora = light_lora_collection[path_f, path_b]
     #light_lora.apply = torch.compile(light_lora.apply)
     flops = light_lora.flops(x, w, u, v, b)
     flops_linear = flops / baseline_nflops
@@ -72,13 +76,19 @@ torch.set_default_dtype(dtype)
 
 w = torch.nn.Parameter(torch.randn(args.n_in, args.n_out), requires_grad=True)
 x_req_grad = (args.x_req_grad == "True")
+u_req_grad = (args.u_req_grad == "True")
+v_req_grad = (args.v_req_grad == "True")
+b_req_grad = (args.b_req_grad == "True")
 x = torch.randn(args.n_batch, args.n_seq, args.n_in, requires_grad=x_req_grad)
-u = torch.randn(args.n_in, args.n_rank, requires_grad=True)
-v = torch.randn(args.n_rank, args.n_out, requires_grad=True)
-b = torch.randn(args.n_out, requires_grad=True)
+u = torch.randn(args.n_in, args.n_rank, requires_grad=u_req_grad)
+v = torch.randn(args.n_rank, args.n_out, requires_grad=v_req_grad)
+if args.b_is_None == "True":
+    b = None
+else:
+    b = torch.randn(args.n_out, requires_grad=b_req_grad)
 
 print("x.shape={} w.shape={} u.shape={} v.shape={} b.shape={}".format( \
-    x.shape, w.shape, u.shape, v.shape, b.shape))
+    x.shape, w.shape, u.shape, v.shape, b.shape if b is not None else None))
 print()
 
 light_lora = None
@@ -87,41 +97,56 @@ if x.requires_grad:
 else:
     baseline_nflops = 4 * prod(x.shape) * w.shape[1]
 
-timestats = mytimeit("(x@w+b).sum().backward()", baseline_nflops)
-print("Flops/linear: 1.0")
-print()
-rows.append({'note': 'x@w+b',
-             'flops/linear': 1.0,
-             **vars(args), **timestats})
+if b is not None:
+    timestats = mytimeit("(x@w+b).sum().backward()", baseline_nflops)
+    print("Flops/linear: 1.0")
+    print()
+    rows.append({'note': 'x@w+b',
+                 'flops/linear': 1.0,
+                 **vars(args), **timestats})
+else:
+    timestats = mytimeit("(x@w).sum().backward()", baseline_nflops)
+    print("Flops/linear: 1.0")
+    print()
+    rows.append({'note': 'x@w',
+                 'flops/linear': 1.0,
+                 **vars(args), **timestats})
 
 # Now W shall not accumulate gradient any more
 w.requires_grad = False
 
-timestats = mytimeit("(x@w+(x@u)@v+b).sum().backward()", 0)
-print()
-rows.append({'note': 'x@w+(x@u)@v+b',
-             **vars(args), **timestats})
+if b is not None:
+    timestats = mytimeit("(x@w+(x@u)@v+b).sum().backward()", 0)
+    print()
+    rows.append({'note': 'x@w+(x@u)@v+b',
+                 **vars(args), **timestats})
+else:
+    timestats = mytimeit("(x@w+(x@u)@v).sum().backward()", 0)
+    print()
+    rows.append({'note': 'x@w+(x@u)@v',
+                 **vars(args), **timestats})
 
-timestats = mytimeit("(x@(w+u@v)+b).sum().backward()", 0)
-print()
-rows.append({'note': 'x@(w+u@v)+b',
-             **vars(args), **timestats})
+if b is not None:
+    timestats = mytimeit("(x@(w+u@v)+b).sum().backward()", 0)
+    print()
+    rows.append({'note': 'x@(w+u@v)+b',
+                 **vars(args), **timestats})
+else:
+    timestats = mytimeit("(x@(w+u@v)).sum().backward()", 0)
+    print()
+    rows.append({'note': 'x@(w+u@v)',
+                 **vars(args), **timestats})
 
 # Find the fastest forward+backward
-if x.requires_grad:
-    lora_collection = light_lora_collection
-else:
-    lora_collection = light_lora_nodx_collection
-
-fast_f = lora_collection.forward_keys[0]
-fast_b = lora_collection.backward_keys[0]
+fast_f = light_lora_collection.forward_keys[0]
+fast_b = light_lora_collection.backward_keys[0]
 fast_mean = mytimeit_lightlora(fast_f, fast_b)
-for path_f in lora_collection.forward_keys[1:]:
+for path_f in light_lora_collection.forward_keys[1:]:
     mean = mytimeit_lightlora(path_f, fast_b)
     if fast_mean > mean:
         fast_f = path_f
         fast_mean = mean
-for path_b in lora_collection.backward_keys[1:]:
+for path_b in light_lora_collection.backward_keys[1:]:
     mean = mytimeit_lightlora(fast_f, path_b)
     if fast_mean > mean:
         fast_b = path_b
@@ -132,5 +157,7 @@ df.sort_values(['mean_time', 'max_mem_MB'],
                ascending = [True, True], 
                inplace=True)
 df.to_csv(args.out)
-print(df)
+print(args)
+print(df.drop(columns=["n_batch", "n_seq", "n_in", "n_out", "n_rank", \
+        "x_req_grad", "u_req_grad", "v_req_grad", "b_req_grad", "dtype"]))
 

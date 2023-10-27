@@ -1,7 +1,55 @@
 import torch
-
 from torch.cuda.amp import custom_fwd, custom_bwd
+from torch.utils import benchmark
 from math import prod
+
+def timeit_lightlora(paths_f, paths_b, X, W, U, V, B):
+    x = torch.zeros_like(X, requires_grad=True)
+    w = torch.zeros_like(W, requires_grad=W.requires_grad)
+    u = torch.zeros_like(U, requires_grad=U.requires_grad)
+    v = torch.zeros_like(V, requires_grad=V.requires_grad)
+    if B is not None:
+        b = torch.zeros_like(B, requires_grad=B.requires_grad)
+    else:
+        b = None
+    # Benchmark forward
+    statement = "light_lora.apply(x, w, u, v, b)"
+    path_b = paths_b[0]
+    best_path_f = -1
+    best_path_time = torch.inf
+    for path_f in paths_f:
+        x.grad, w.grad, u.grad, v.grad = [None] * 4
+        if b is not None:
+            b.grad = None
+        print("benchmarking forward {}".format(path_f))
+        light_lora = light_lora_collection[path_f, path_b]
+        globals_ = {'light_lora': light_lora, 'x': x, 'w': w, 'u': u, 'v': v, \
+                'b': b}
+        bench = benchmark.Timer(stmt=statement, globals=globals_)
+        measure_warmup = bench.blocked_autorange(min_run_time=0.1)
+        measure = bench.blocked_autorange(min_run_time=0.2)
+        if best_path_time > measure.mean:
+            best_path_time = measure.mean
+            best_path_f = path_f
+    # Benchmark backward
+    statement = "loss.backward(retain_graph=True)"
+    path_f = best_path_f
+    best_path_time = torch.inf
+    for path_b in paths_b:
+        x.grad, w.grad, u.grad, v.grad = [None] * 4
+        if b is not None:
+            b.grad = None
+        print("benchmarking backward {}".format(path_b))
+        light_lora = light_lora_collection[path_f, path_b]
+        loss = light_lora.apply(x, w, u, v, b).sum().requires_grad_(True)
+        globals_ = {'loss': loss}
+        bench = benchmark.Timer(stmt=statement, globals=globals_)
+        measure_warmup = bench.blocked_autorange(min_run_time=0.1)
+        measure = bench.blocked_autorange(min_run_time=0.2)
+        if best_path_time > measure.mean:
+            best_path_time = measure.mean
+            best_path_b = path_b
+    return best_path_f, best_path_b
 
 class LightLoRACollection(object):
     def __init__(self):
@@ -9,6 +57,12 @@ class LightLoRACollection(object):
                 if i.startswith("forward") and i[-5:] != "flops"]
         self.backward_keys = [i for i in dir(self) \
                 if i.startswith("backward") and i[-5:] != "flops"]
+        self.benchmarks = {}
+        self.forward_keys_short = ["forward{}".format(i) \
+                for i in range(1, 4)]
+        self.backward_keys_short = ["backward{}".format(i) \
+                for i in range(1, 6)]
+        self.benchmarks_short = {}
 
     def __getitem__(self, index):
         path_f, path_b = index
@@ -30,7 +84,7 @@ class LightLoRACollection(object):
                     + method_backward_flops(input, W, U, V, b)
         return LightLoRA
 
-    def get_best(self, X, W, U, V, b):
+    def get_best_by_flops(self, X, W, U, V, b):
         path_f_flops = [getattr(self, key[:8]+"_flops")(X, W, U, V, b) \
                 for key in self.forward_keys]
         path_f_index = 0
@@ -45,6 +99,34 @@ class LightLoRACollection(object):
                 path_b_index = i
         return self.forward_keys[path_f_index], \
                 self.backward_keys[path_b_index]
+
+    def get_best_by_bench(self, X, W, U, V, b):
+        if b is not None:
+            key = (X.shape, X.requires_grad, W.shape, W.requires_grad, \
+                    U.shape, U.requires_grad, V.shape, V.requires_grad, \
+                    b.shape, b.requires_grad)
+        else:
+            key = (X.shape, X.requires_grad, W.shape, W.requires_grad, \
+                    U.shape, U.requires_grad, V.shape, V.requires_grad)
+        if key not in self.benchmarks:
+            path_f, path_b = timeit_lightlora(self.forward_keys, \
+                    self.backward_keys, X, W, U, V, b)
+            self.benchmarks[key] = (path_f, path_b)
+        return self.benchmarks[key]
+
+    def get_best_by_bench_short(self, X, W, U, V, b):
+        if b is not None:
+            key = (X.shape, X.requires_grad, W.shape, W.requires_grad, \
+                    U.shape, U.requires_grad, V.shape, V.requires_grad, \
+                    b.shape, b.requires_grad)
+        else:
+            key = (X.shape, X.requires_grad, W.shape, W.requires_grad, \
+                    U.shape, U.requires_grad, V.shape, V.requires_grad)
+        if key not in self.benchmarks_short:
+            path_f, path_b = timeit_lightlora(self.forward_keys_short, \
+                    self.backward_keys_short, X, W, U, V, b)
+            self.benchmarks_short[key] = (path_f, path_b)
+        return self.benchmarks_short[key]
 
     @staticmethod
     def save_X(X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad):
@@ -78,7 +160,7 @@ class LightLoRACollection(object):
     def save_context(ctx, input, W, U, V, b):
         saved_tensors = []
         requires_grad = [input.requires_grad, W.requires_grad, \
-                U.requires_grad, V.requires_grad, b.requires_grad]
+                U.requires_grad, V.requires_grad, b.requires_grad if b is not None else None]
         if __class__.save_X(*requires_grad):
             saved_tensors.append(input)
         else:
@@ -118,7 +200,10 @@ class LightLoRACollection(object):
         X = input.reshape(-1, input.shape[-1])
         Y_shape = torch.Size(list(input.shape[:-1]) + [W.shape[1]])
         __class__.save_context(ctx, input, W, U, V, b)
-        return (torch.addmm(b, X, W).addmm_(X.mm(U), V)).reshape(Y_shape)
+        if b is not None:
+            return (torch.addmm(b, X, W).addmm_(X.mm(U), V)).reshape(Y_shape)
+        else:
+            return (X.mm(W).addmm_(X.mm(U), V)).reshape(Y_shape)
 
     @staticmethod
     def forward1_flops(input, W, U, V, b):
@@ -138,7 +223,10 @@ class LightLoRACollection(object):
         X = input.reshape(-1, input.shape[-1])
         Y_shape = torch.Size(list(input.shape[:-1]) + [W.shape[1]])
         __class__.save_context(ctx, input, W, U, V, b)
-        return torch.addmm(b, X, W.addmm(U, V)).reshape(Y_shape)
+        if b is not None:
+            return torch.addmm(b, X, W.addmm(U, V)).reshape(Y_shape)
+        else:
+            return X.mm(W.addmm(U, V)).reshape(Y_shape)
 
     @staticmethod
     def forward2_flops(input, W, U, V, b):
@@ -156,7 +244,10 @@ class LightLoRACollection(object):
         X = input.reshape(-1, input.shape[-1])
         Y_shape = torch.Size(list(input.shape[:-1]) + [W.shape[1]])
         __class__.save_context(ctx, input, W, U, V, b)
-        return torch.addmm(b, X.mm(U), V).addmm_(X, W).reshape(Y_shape)
+        if b is not None:
+            return torch.addmm(b, X.mm(U), V).addmm_(X, W).reshape(Y_shape)
+        else:
+            return X.mm(U).mm(V).addmm_(X, W).reshape(Y_shape)
 
     @staticmethod
     def forward3_flops(input, W, U, V, b):
@@ -392,7 +483,7 @@ class LightLoRACollection(object):
     def backward1_flops(input, W, U, V, b):
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
                 input.requires_grad, W.requires_grad, U.requires_grad, \
-                V.requires_grad, b.requires_grad
+                V.requires_grad, b.requires_grad if b is not None else None
         nflops = 0
         # Z1 = dY .mm (V.t())
         if X_req_grad or U_req_grad:
@@ -899,7 +990,7 @@ class LightLoRACollection(object):
     def backward2_flops(input, W, U, V, b):
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
                 input.requires_grad, W.requires_grad, U.requires_grad, \
-                V.requires_grad, b.requires_grad
+                V.requires_grad, b.requires_grad if b is not None else None
         nflops = 0
         # Z1 = dY .mm (V.t())
         if X_req_grad or U_req_grad:
@@ -1203,7 +1294,7 @@ class LightLoRACollection(object):
     def backward3_flops(input, W, U, V, b):
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
                 input.requires_grad, W.requires_grad, U.requires_grad, \
-                V.requires_grad, b.requires_grad
+                V.requires_grad, b.requires_grad if b is not None else None
         nflops = 0
         # Z2 = X.t() .mm (dY)
         if U_req_grad or V_req_grad:
@@ -1341,7 +1432,7 @@ class LightLoRACollection(object):
     def backward4_flops(input, W, U, V, b):
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
                 input.requires_grad, W.requires_grad, U.requires_grad, \
-                V.requires_grad, b.requires_grad
+                V.requires_grad, b.requires_grad if b is not None else None
         nflops = 0
         # Z2 = X.t() .mm (dY)
         if U_req_grad or V_req_grad:
@@ -1512,7 +1603,7 @@ class LightLoRACollection(object):
     def backward5_flops(input, W, U, V, b):
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
                 input.requires_grad, W.requires_grad, U.requires_grad, \
-                V.requires_grad, b.requires_grad
+                V.requires_grad, b.requires_grad if b is not None else None
         nflops = 0
         # Z1 = dY .mm (V.t())
         if U_req_grad:
@@ -1538,24 +1629,43 @@ light_lora_collection = LightLoRACollection()
 
 class LightLoRA(torch.nn.Linear):
     def __init__(self, in_features, out_features, rank, bias=True, \
-            device=None, dtype=None):
+            device=None, dtype=None, fastest: str="flops"):
+        if fastest not in ["flops", "benchmark", "benchmark_short"]:
+            raise ValueError("Possible values for \"fastest\" are " \
+                    "\"flops\", \"benchmark\", \"benchmark_short\"")
         super().__init__(in_features, out_features, bias, device, dtype)
+        self.fastest = fastest
         self.U = torch.nn.Parameter(torch.randn(in_features, rank, \
                 device=device, dtype=dtype))
         self.V = torch.nn.Parameter(torch.randn(rank, out_features, \
                 device=device, dtype=dtype))
+        self.weight.requires_grad = False
     
     def forward(self, x):
-        path_f, path_b = light_lora_collection.get_best(x, self.weight.t(), \
-                self.U, self.V)
+        if self.fastest == "flops":
+            path_f, path_b = light_lora_collection.get_best_by_flops(x, \
+                    self.weight.t(), self.U, self.V, self.bias)
+        elif self.fastest == "benchmark":
+            path_f, path_b = light_lora_collection.get_best_by_bench(x, \
+                    self.weight.t(), self.U, self.V, self.bias)
+        elif self.fastest == "benchmark_short":
+            path_f, path_b = light_lora_collection.get_best_by_bench_short(x, \
+                    self.weight.t(), self.U, self.V, self.bias)
         y = light_lora_collection[path_f, path_b].apply(x, self.weight.t(), \
-                self.U, self.V)
+                self.U, self.V, self.bias)
         return y
 
     def flops(self, x):
-        path_f, path_b = light_lora_collection.get_best(x, self.weight.t(), \
-                self.U, self.V)
+        if self.fastest == "flops":
+            path_f, path_b = light_lora_collection.get_best_by_flops(x, \
+                    self.weight.t(), self.U, self.V, self.bias)
+        elif self.fastest == "benchmark":
+            path_f, path_b = light_lora_collection.get_best_by_bench(x, \
+                    self.weight.t(), self.U, self.V, self.bias)
+        elif self.fastest == "benchmark_short":
+            path_f, path_b = light_lora_collection.get_best_by_bench_short(x, \
+                    self.weight.t(), self.U, self.V, self.bias)
         nflops = light_lora_collection[path_f, path_b].flops(x, \
-                self.weight.t(), self.U, self.V)
+                self.weight.t(), self.U, self.V, self.bias)
         return nflops
 

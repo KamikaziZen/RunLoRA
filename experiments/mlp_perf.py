@@ -44,6 +44,7 @@ class LoRA(torch.nn.Linear):
                 device=device, dtype=dtype))
         self.V = torch.nn.Parameter(torch.randn(rank, out_features,\
                 device=device, dtype=dtype))
+        self.weight.requires_grad = False
     
     def forward(self, x):
         y = super().forward(x) + (x@self.U)@self.V
@@ -66,13 +67,13 @@ class MLPLoRA(torch.nn.Module):
         return y
 
 class MLPLightLoRA(torch.nn.Module):
-    def __init__(self, n_layer, n_in, n_out, n_rank):
+    def __init__(self, n_layer, n_in, n_out, n_rank, fastest):
         super().__init__()
         self.n_layer = n_layer
         self.lora1 = torch.nn.ModuleList([LightLoRA(n_in, n_out, n_rank, \
-                bias=False) for i in range(n_layer)])
+                bias=False, fastest=fastest) for i in range(n_layer)])
         self.lora2 = torch.nn.ModuleList([LightLoRA(n_out, n_in, n_rank, \
-                bias=False) for i in range(n_layer)])
+                bias=False, fastest=fastest) for i in range(n_layer)])
 
     def forward(self, x):
         y = x
@@ -141,16 +142,21 @@ timestats = mytimeit("MLPLoRA", 0)
 print()
 rows.append({'note': 'MLPLoRA', **vars(args), **timestats})
 
-mlp = MLPLightLoRA(args.n_layer, args.n_in, args.n_out, args.n_rank)
-timestats = mytimeit("MLPLightLoRA", mlp.flops(x))
-print()
-rows.append({'note': 'MLPLightLoRA', **vars(args), **timestats})
-
+#strategies = ["flops", "benchmark", "benchmark_short"]
+strategies = ["flops", "benchmark_short"]
+for fastest in strategies:
+    mlp = MLPLightLoRA(args.n_layer, args.n_in, args.n_out, args.n_rank, \
+            fastest)
+    timestats = mytimeit("MLPLightLoRA({})".format(fastest), mlp.flops(x))
+    print()
+    rows.append({'note': 'MLPLightLoRA({})'.format(fastest), **vars(args), \
+            **timestats})
 
 df = pd.DataFrame.from_records(rows).drop(columns="out")
 df.sort_values(['mean_time', 'max_mem_MB'], 
                ascending = [True, True], 
                inplace=True)
 df.to_csv(args.out)
-print(df)
+print(df.drop(columns=["n_batch", "n_seq", "n_layer", "n_in", "n_out", \
+        "n_rank", "dtype"]))
 
