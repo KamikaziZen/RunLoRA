@@ -201,7 +201,7 @@ class LightLoRACollection(object):
         Y_shape = torch.Size(list(input.shape[:-1]) + [W.shape[1]])
         __class__.save_context(ctx, input, W, U, V, b)
         if b is not None:
-            return (torch.addmm(b, X, W).addmm_(X.mm(U), V)).reshape(Y_shape)
+            return (b.addmm(X, W).addmm_(X.mm(U), V)).reshape(Y_shape)
         else:
             return (X.mm(W).addmm_(X.mm(U), V)).reshape(Y_shape)
 
@@ -224,7 +224,7 @@ class LightLoRACollection(object):
         Y_shape = torch.Size(list(input.shape[:-1]) + [W.shape[1]])
         __class__.save_context(ctx, input, W, U, V, b)
         if b is not None:
-            return torch.addmm(b, X, W.addmm(U, V)).reshape(Y_shape)
+            return b.addmm(X, W.addmm(U, V)).reshape(Y_shape)
         else:
             return X.mm(W.addmm(U, V)).reshape(Y_shape)
 
@@ -245,7 +245,7 @@ class LightLoRACollection(object):
         Y_shape = torch.Size(list(input.shape[:-1]) + [W.shape[1]])
         __class__.save_context(ctx, input, W, U, V, b)
         if b is not None:
-            return torch.addmm(b, X.mm(U), V).addmm_(X, W).reshape(Y_shape)
+            return b.addmm(X.mm(U), V).addmm_(X, W).reshape(Y_shape)
         else:
             return X.mm(U).mm(V).addmm_(X, W).reshape(Y_shape)
 
@@ -278,7 +278,8 @@ class LightLoRACollection(object):
         if V_req_grad:
             grad_V = (X.mm(U)).t().mm(dY)
         if X_req_grad:
-            grad_input = dY.mm(W.t()).addmm_(Z1, U.t()).reshape(input.shape)
+            #grad_input = dY.mm(W.t()).addmm_(Z1, U.t()).reshape(input.shape)
+            grad_input = Z1.mm(U.t()).addmm_(dY, W.t()).reshape(input.shape)
         if b_req_grad:
             grad_b = dY.sum(axis=0)
         return grad_input, grad_W, grad_U, grad_V, grad_b

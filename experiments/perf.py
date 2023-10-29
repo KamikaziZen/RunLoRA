@@ -18,47 +18,60 @@ parser.add_argument("--u_req_grad", choices=["True", "False"], default="True")
 parser.add_argument("--v_req_grad", choices=["True", "False"], default="True")
 parser.add_argument("--b_req_grad", choices=["True", "False"], default="True")
 parser.add_argument("--dtype", default="float")
+parser.add_argument("--short", choices=["True", "False"], default="True")
 parser.add_argument('-o', "--out", type=str, default='out')
 
 args = parser.parse_args()
 rows = []
 
-def mytimeit(statement, nflops):
+def mytimeit(statement, glbls):
     w.grad = None
     x.grad = None
     u.grad = None
     v.grad = None
-    bench = benchmark.Timer(stmt=statement, globals={'w': w, 'x': x, 'u': u, \
-            'v': v, 'b': b, 'light_lora': light_lora, 'torch': torch})
+    bench = benchmark.Timer(stmt=statement, globals=glbls)
     measure_warmup = bench.blocked_autorange(min_run_time=1.0)
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats()
     measure = bench.blocked_autorange(min_run_time=1.0)
     print("Evaluating \"{}\"".format(statement))
     print("Mean time: {} us".format(measure.mean * 1000000))
-    print("GFlops: {}".format(nflops*1e-9))
-    print("GFlops/s: {}".format(nflops*1e-9 / measure.mean))
     print("Max mem: {} MB".format(torch.cuda.max_memory_allocated()/2**20))
     return {'mean_time': measure.mean * 1000000,
-            'Gflops': nflops * 1e-9, 
-            'Gflops/s': nflops * 1e-9 / measure.mean,
             'max_mem_MB': torch.cuda.max_memory_allocated() / 2**20}
 
 def mytimeit_lightlora(path_f, path_b):
     print("path_f={} path_b={}".format(path_f, path_b))
     global light_lora
     light_lora = light_lora_collection[path_f, path_b]
-    #light_lora.apply = torch.compile(light_lora.apply)
-    flops = light_lora.flops(x, w, u, v, b)
-    flops_linear = flops / baseline_nflops
-    timestats = mytimeit("light_lora.apply(x, w, u, v, b).sum().backward()", 
-                         flops)
-    print("Flops/linear: {}".format(flops_linear))
+    glbls={'w': w, 'x': x, 'u': u, 'v': v, 'b': b, 'light_lora': light_lora}
+    timestats = mytimeit("light_lora.apply(x, w, u, v, b).sum().backward()", \
+            glbls)
     print()
     rows.append({'path_f': path_f, 'path_b': path_b, \
-            'note': light_lora.__name__, 'flops': flops, \
-            'flops/linear': flops_linear, **vars(args), \
-            **timestats})
+            'note': light_lora.__name__, **timestats})
+    return timestats['mean_time']
+
+def mytimeit_lightlora_fwd(path_f, path_b):
+    print("path_f={} path_b={}".format(path_f, path_b))
+    global light_lora
+    light_lora = light_lora_collection[path_f, path_b]
+    glbls={'w': w, 'x': x, 'u': u, 'v': v, 'b': b, 'light_lora': light_lora}
+    timestats = mytimeit("light_lora.apply(x, w, u, v, b)", glbls)
+    print()
+    rows.append({'path_f': path_f, 'path_b': path_b, \
+            'note': light_lora.__name__, **timestats})
+    return timestats['mean_time']
+
+def mytimeit_lightlora_bwd(path_f, path_b):
+    print("path_f={} path_b={}".format(path_f, path_b))
+    global light_lora
+    y = light_lora_collection[path_f, path_b].apply(x, w, u, v, b)
+    glbls = {'y': y}
+    timestats = mytimeit("y.sum().backward(retain_graph=True)", glbls)
+    print()
+    rows.append({'path_f': path_f, 'path_b': path_b, \
+            'note': light_lora.__name__, **timestats})
     return timestats['mean_time']
 
 device = torch.device("cuda")
@@ -97,56 +110,48 @@ if x.requires_grad:
 else:
     baseline_nflops = 4 * prod(x.shape) * w.shape[1]
 
-if b is not None:
-    timestats = mytimeit("(x@w+b).sum().backward()", baseline_nflops)
-    print("Flops/linear: 1.0")
-    print()
-    rows.append({'note': 'x@w+b',
-                 'flops/linear': 1.0,
-                 **vars(args), **timestats})
-else:
-    timestats = mytimeit("(x@w).sum().backward()", baseline_nflops)
-    print("Flops/linear: 1.0")
-    print()
-    rows.append({'note': 'x@w',
-                 'flops/linear': 1.0,
-                 **vars(args), **timestats})
-
 # Now W shall not accumulate gradient any more
 w.requires_grad = False
 
 if b is not None:
-    timestats = mytimeit("(x@w+(x@u)@v+b).sum().backward()", 0)
-    print()
-    rows.append({'note': 'x@w+(x@u)@v+b',
-                 **vars(args), **timestats})
+    glbls = {'x': x, 'w': w, 'u': u, 'v': v, 'b': b}
+    stmt_all = ["(x@w+(x@u)@v+b)", "xx=x.reshape(-1,x.shape[-1]); (b.addmm(" \
+            "xx,w).addmm_(xx.mm(u), v).reshape(*x.shape[:-1],w.shape[-1]))", \
+            "(x@(w+u@v)+b)", "xx=x.reshape(-1, x.shape[-1]); (b.addmm(xx,w." \
+            "addmm(u,v)))"]
 else:
-    timestats = mytimeit("(x@w+(x@u)@v).sum().backward()", 0)
-    print()
-    rows.append({'note': 'x@w+(x@u)@v',
-                 **vars(args), **timestats})
+    glbls = {'x': x, 'w': w, 'u': u, 'v': v}
+    stmt_all = ["(x@w+(x@u)@v)", "xx=x.reshape(-1,x.shape[-1]); (xx.mm(w)" \
+            ".addmm_(xx.mm(u),v).reshape(*x.shape[:-1],w.shape[-1]))", \
+            "(x@(w+u@v))", "xx=x.reshape(-1,x.shape[-1]); (xx.mm(w.addmm(" \
+            "u,v)))"]
 
-if b is not None:
-    timestats = mytimeit("(x@(w+u@v)+b).sum().backward()", 0)
+for stmt in stmt_all:
+    timestats = mytimeit(stmt, glbls)
     print()
-    rows.append({'note': 'x@(w+u@v)+b',
-                 **vars(args), **timestats})
-else:
-    timestats = mytimeit("(x@(w+u@v)).sum().backward()", 0)
+    rows.append({'note': stmt, **vars(args), **timestats})
+    stmt2 = stmt + ".sum().backward()"
+    timestats = mytimeit(stmt2, glbls)
     print()
-    rows.append({'note': 'x@(w+u@v)',
-                 **vars(args), **timestats})
+    rows.append({'note': stmt2, **vars(args), **timestats})
 
 # Find the fastest forward+backward
-fast_f = light_lora_collection.forward_keys[0]
-fast_b = light_lora_collection.backward_keys[0]
-fast_mean = mytimeit_lightlora(fast_f, fast_b)
-for path_f in light_lora_collection.forward_keys[1:]:
-    mean = mytimeit_lightlora(path_f, fast_b)
+if args.short == "True":
+    fwd_keys = light_lora_collection.forward_keys_short
+    bwd_keys = light_lora_collection.backward_keys_short
+else:
+    fwd_keys = light_lora_collection.forward_keys
+    bwd_keys = light_lora_collection.backward_keys
+fast_f = fwd_keys[0]
+fast_b = bwd_keys[0]
+fast_mean = torch.inf
+for path_f in fwd_keys:
+    mean = mytimeit_lightlora_fwd(path_f, fast_b)
     if fast_mean > mean:
         fast_f = path_f
         fast_mean = mean
-for path_b in light_lora_collection.backward_keys[1:]:
+fast_mean = torch.inf
+for path_b in bwd_keys:
     mean = mytimeit_lightlora(fast_f, path_b)
     if fast_mean > mean:
         fast_b = path_b
