@@ -86,13 +86,11 @@ class MLPLightLoRA(torch.nn.Module):
     def flops(self, x):
         nflops = 0
         y = x
-        with torch.no_grad():
-            for i in range(self.n_layer):
-                nflops += self.lora1[i].flops(y)
-                y = self.lora1[i](y)
-                nflops += self.lora2[i].flops(y)
-                y = self.lora2[i](y)
-        del y
+        for i in range(self.n_layer):
+            nflops += self.lora1[i].flops(y)
+            y = self.lora1[i](y)
+            nflops += self.lora2[i].flops(y)
+            y = self.lora2[i](y)
         return nflops
 
 
@@ -126,11 +124,11 @@ else:
 torch.set_default_device(device)
 torch.set_default_dtype(dtype)
 
-x = torch.randn(args.n_batch, args.n_seq, args.n_in, requires_grad=False)
-y = torch.randn(args.n_batch, args.n_seq, args.n_out, requires_grad=False)
+x = torch.randn(args.n_batch, args.n_seq, args.n_in, requires_grad=True)
+y = torch.randn(args.n_batch, args.n_seq, args.n_out, requires_grad=True)
 
 if not args.ignore_linear:
-    baseline_nflops = (args.n_layer*12-2) * args.n_batch * args.n_seq * args.n_in \
+    baseline_nflops = args.n_layer * 12 * args.n_batch * args.n_seq * args.n_in \
             * args.n_out
     mlp = MLPLinear(args.n_layer, args.n_in, args.n_out)
     timestats = mytimeit("MLPLinear", baseline_nflops)
@@ -162,5 +160,5 @@ df.to_csv(args.out)
 print(df.drop(columns=["n_batch", "n_seq", "n_layer", "n_in", "n_out", \
         "n_rank", "dtype"]))
 print()
-print("Best fwd and bwd")
+print("Best fwd and bwd by benchmarks short")
 print(light_lora_collection.benchmarks_short)

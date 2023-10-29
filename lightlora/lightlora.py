@@ -4,7 +4,7 @@ from torch.utils import benchmark
 from math import prod
 
 def timeit_lightlora(paths_f, paths_b, X, W, U, V, B):
-    x = torch.zeros_like(X, requires_grad=True)
+    x = torch.zeros_like(X, requires_grad=X.requires_grad)
     w = torch.zeros_like(W, requires_grad=W.requires_grad)
     u = torch.zeros_like(U, requires_grad=U.requires_grad)
     v = torch.zeros_like(V, requires_grad=V.requires_grad)
@@ -85,20 +85,20 @@ class LightLoRACollection(object):
         return LightLoRA
 
     def get_best_by_flops(self, X, W, U, V, b):
-        path_f_flops = [getattr(self, key[:8]+"_flops")(X, W, U, V, b) \
-                for key in self.forward_keys]
+        path_f_flops = [getattr(self, key+"_flops")(X, W, U, V, b) \
+                for key in self.forward_keys_short]
         path_f_index = 0
         for i in range(1, len(path_f_flops)):
             if path_f_flops[path_f_index] > path_f_flops[i]:
                 path_f_index = i
-        path_b_flops = [getattr(self, key[:9]+"_flops")(X, W, U, V, b) \
-                for key in self.backward_keys]
+        path_b_flops = [getattr(self, key+"_flops")(X, W, U, V, b) \
+                for key in self.backward_keys_short]
         path_b_index = 0
         for i in range(1, len(path_b_flops)):
             if path_b_flops[path_b_index] > path_b_flops[i]:
                 path_b_index = i
-        return self.forward_keys[path_f_index], \
-                self.backward_keys[path_b_index]
+        return self.forward_keys_short[path_f_index], \
+                self.backward_keys_short[path_b_index]
 
     def get_best_by_bench(self, X, W, U, V, b):
         if b is not None:
