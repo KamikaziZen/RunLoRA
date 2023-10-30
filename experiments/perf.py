@@ -42,13 +42,16 @@ def mytimeit(statement, glbls):
     measure_warmup = bench.blocked_autorange(min_run_time=1.0)
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats()
-    measure = bench.blocked_autorange(min_run_time=1.0)
+    measure = bench.blocked_autorange(min_run_time=3.0)
     print("Evaluating \"{}\"".format(statement))
+    print("Computing mean with {} measurments, {} runs per measurment".format(
+        len(measure.times), measure.number_per_run))
     print("Mean time: {} us".format(measure.mean * 1000000))
     print("Max mem: {} MB".format(torch.cuda.max_memory_allocated()/2**20))
     print()
     return {'mean_time': measure.mean * 1000000,
-            'max_mem_MB': torch.cuda.max_memory_allocated() / 2**20}
+            'max_mem_MB': torch.cuda.max_memory_allocated() / 2**20,
+            'msrs/runs': f'{len(measure.times)}/{measure.number_per_run}'}
 
 
 def mytimeit_lightlora(*vars, path_f, path_b):
@@ -183,7 +186,7 @@ def main(args):
                    ascending=[True, True], inplace=True)
     df.to_csv(args.out)
     print(args)
-    print(df[['statement', 'mean_time', 'max_mem_MB', 'path_f', 'path_b']])
+    print(df[['statement', 'mean_time', 'max_mem_MB', 'path_f', 'path_b', 'msrs/runs']])
 
 
 if __name__ == "__main__":
