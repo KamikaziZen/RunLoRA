@@ -131,6 +131,7 @@ def main(args):
             "xx=x.reshape(-1,x.shape[-1]); (b.addmm("
             "xx,w).addmm_(xx.mm(u), v).reshape(*x.shape[:-1],w.shape[-1]))",
             "(x@(w+u@v)+b)",
+            "(x@(w.addmm(u,v))+b)",
             "xx=x.reshape(-1, x.shape[-1]); (b.addmm(xx,w.addmm(u,v)))",
         ]
     else:
@@ -140,6 +141,7 @@ def main(args):
             "xx=x.reshape(-1,x.shape[-1]); (xx.mm(w)"
             ".addmm_(xx.mm(u),v).reshape(*x.shape[:-1],w.shape[-1]))",
             "(x@(w+u@v))",
+            "(x@(w.addmm(u,v)))",
             "xx=x.reshape(-1,x.shape[-1]); (xx.mm(w.addmm(u,v)))",
         ]
 
