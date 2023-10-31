@@ -3,6 +3,7 @@ from torch.cuda.amp import custom_fwd, custom_bwd
 from torch.utils import benchmark
 from math import prod
 
+
 def timeit_lightlora(paths_f, paths_b, X, W, U, V, B):
     x = torch.zeros_like(X, requires_grad=X.requires_grad)
     w = torch.zeros_like(W, requires_grad=W.requires_grad)
@@ -26,7 +27,7 @@ def timeit_lightlora(paths_f, paths_b, X, W, U, V, B):
         globals_ = {'light_lora': light_lora, 'x': x, 'w': w, 'u': u, 'v': v, \
                 'b': b}
         bench = benchmark.Timer(stmt=statement, globals=globals_)
-        measure_warmup = bench.blocked_autorange(min_run_time=1)
+        _ = bench.blocked_autorange(min_run_time=1)
         measure = bench.blocked_autorange(min_run_time=5)
         if best_path_time > measure.mean:
             best_path_time = measure.mean
@@ -44,12 +45,13 @@ def timeit_lightlora(paths_f, paths_b, X, W, U, V, B):
         loss = light_lora.apply(x, w, u, v, b).sum().requires_grad_(True)
         globals_ = {'loss': loss}
         bench = benchmark.Timer(stmt=statement, globals=globals_)
-        measure_warmup = bench.blocked_autorange(min_run_time=1)
+        _ = bench.blocked_autorange(min_run_time=1)
         measure = bench.blocked_autorange(min_run_time=5)
         if best_path_time > measure.mean:
             best_path_time = measure.mean
             best_path_b = path_b
     return best_path_f, best_path_b
+
 
 class LightLoRACollection(object):
     def __init__(self):
@@ -76,9 +78,11 @@ class LightLoRACollection(object):
         method_backward = getattr(self, path_b)
         method_forward_flops = getattr(self, path_f_flops)
         method_backward_flops = getattr(self, path_b_flops)
+
         class LightLoRA(torch.autograd.Function):
             forward = method_forward
             backward = method_backward
+
             def flops(input, W, U, V, b):
                 return method_forward_flops(input, W, U, V, b) \
                     + method_backward_flops(input, W, U, V, b)
@@ -98,35 +102,47 @@ class LightLoRACollection(object):
             if path_b_flops[path_b_index] > path_b_flops[i]:
                 path_b_index = i
         return self.forward_keys_short[path_f_index], \
-                self.backward_keys_short[path_b_index]
+               self.backward_keys_short[path_b_index]
 
     def get_best_by_bench(self, X, W, U, V, b):
         if b is not None:
-            key = (X.shape, X.requires_grad, W.shape, W.requires_grad, \
-                    U.shape, U.requires_grad, V.shape, V.requires_grad, \
-                    b.shape, b.requires_grad)
+            key = (X.shape, X.requires_grad, W.shape, W.requires_grad,
+                   U.shape, U.requires_grad, V.shape, V.requires_grad,
+                   b.shape, b.requires_grad)
         else:
-            key = (X.shape, X.requires_grad, W.shape, W.requires_grad, \
-                    U.shape, U.requires_grad, V.shape, V.requires_grad)
+            key = (X.shape, X.requires_grad, W.shape, W.requires_grad,
+                   U.shape, U.requires_grad, V.shape, V.requires_grad)
         if key not in self.benchmarks:
-            path_f, path_b = timeit_lightlora(self.forward_keys, \
-                    self.backward_keys, X, W, U, V, b)
+            path_f, path_b = timeit_lightlora(self.forward_keys,
+                                              self.backward_keys,
+                                              X, W, U, V, b)
             self.benchmarks[key] = (path_f, path_b)
         return self.benchmarks[key]
 
     def get_best_by_bench_short(self, X, W, U, V, b):
         if b is not None:
-            key = (X.shape, X.requires_grad, W.shape, W.requires_grad, \
-                    U.shape, U.requires_grad, V.shape, V.requires_grad, \
-                    b.shape, b.requires_grad)
+            key = (X.shape, X.requires_grad, W.shape, W.requires_grad,
+                   U.shape, U.requires_grad, V.shape, V.requires_grad,
+                   b.shape, b.requires_grad)
         else:
-            key = (X.shape, X.requires_grad, W.shape, W.requires_grad, \
-                    U.shape, U.requires_grad, V.shape, V.requires_grad)
+            key = (X.shape, X.requires_grad, W.shape, W.requires_grad,
+                   U.shape, U.requires_grad, V.shape, V.requires_grad)
         if key not in self.benchmarks_short:
-            path_f, path_b = timeit_lightlora(self.forward_keys_short, \
-                    self.backward_keys_short, X, W, U, V, b)
+            path_f, path_b = timeit_lightlora(
+                self.forward_keys_short, self.backward_keys_short,
+                X, W, U, V, b)
             self.benchmarks_short[key] = (path_f, path_b)
         return self.benchmarks_short[key]
+
+    def get_best(self, criterion, x, W, U, V, b):
+        if criterion == "flops":
+            path_f, path_b = self.get_best_by_flops(x, W, U, V, b)
+        elif criterion == "benchmark":
+            path_f, path_b = self.get_best_by_bench(x, W, U, V, b)
+        elif criterion == "benchmark_short":
+            path_f, path_b = self.get_best_by_bench_short(x, W, U, V, b)
+
+        return self.__getitem__((path_f, path_b))
 
     @staticmethod
     def save_X(X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad):
@@ -159,8 +175,9 @@ class LightLoRACollection(object):
     @staticmethod
     def save_context(ctx, input, W, U, V, b):
         saved_tensors = []
-        requires_grad = [input.requires_grad, W.requires_grad, \
-                U.requires_grad, V.requires_grad, b.requires_grad if b is not None else None]
+        requires_grad = [input.requires_grad, W.requires_grad,
+                         U.requires_grad, V.requires_grad,
+                         b.requires_grad if b is not None else None]
         if __class__.save_X(*requires_grad):
             saved_tensors.append(input)
         else:
@@ -263,13 +280,14 @@ class LightLoRACollection(object):
     @staticmethod
     @custom_bwd
     def backward1(ctx, grad_output):
-        """load(X,W,U,V) Z1=dYV' Z2=XU dU=X'Z1 dV=Z2'dY dX=dYW'+Z1U' db=dY.sum(axis=0)"""
+        """load(X,W,U,V) Z1=dYV' Z2=XU
+        dU=X'Z1 dV=Z2'dY dX=dYW'+Z1U' db=dY.sum(axis=0)"""
         input, W, U, V, b = __class__.load_context(ctx)
         if input is not None:
             X = input.reshape(-1, input.shape[-1])
         dY = grad_output.reshape(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
-                ctx.needs_input_grad
+            ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
         if X_req_grad or U_req_grad:
             Z1 = dY.mm(V.t())
@@ -287,13 +305,14 @@ class LightLoRACollection(object):
     @staticmethod
     @custom_bwd
     def backward1_X_Z1_Z2_dY(ctx, grad_output):
-        """load(X,W,U,V) Z1=dYV' Z2=XU dU=X'Z1 dV=Z2'dY dX=dYW'+Z1U' db=dY.sum(axis=0)"""
+        """load(X,W,U,V) Z1=dYV' Z2=XU
+        dU=X'Z1 dV=Z2'dY dX=dYW'+Z1U' db=dY.sum(axis=0)"""
         input, W, U, V, b = __class__.load_context(ctx)
         X_shape = input.shape
         X = input.reshape(-1, X_shape[-1])
         dY = grad_output.reshape(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
-                ctx.needs_input_grad
+            ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
         Z1, Z2 = [None] * 2
         if X_req_grad or U_req_grad:
@@ -320,13 +339,14 @@ class LightLoRACollection(object):
     @staticmethod
     @custom_bwd
     def backward1_X_Z2_Z1_dY(ctx, grad_output):
-        """load(X,W,U,V) Z1=dYV' Z2=XU dU=X'Z1 dV=Z2'dY dX=dYW'+Z1U' db=dY.sum(axis=0)"""
+        """load(X,W,U,V) Z1=dYV' Z2=XU
+        dU=X'Z1 dV=Z2'dY dX=dYW'+Z1U' db=dY.sum(axis=0)"""
         input, W, U, V, b = __class__.load_context(ctx)
         X_shape = input.shape
         X = input.reshape(-1, X_shape[-1])
         dY = grad_output.reshape(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
-                ctx.needs_input_grad
+            ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
         Z1, Z2 = [None] * 2
         if X_req_grad or U_req_grad:
@@ -353,13 +373,14 @@ class LightLoRACollection(object):
     @staticmethod
     @custom_bwd
     def backward1_X_Z2_dY_Z1(ctx, grad_output):
-        """load(X,W,U,V) Z1=dYV' Z2=XU dU=X'Z1 dV=Z2'dY dX=dYW'+Z1U' db=dY.sum(axis=0)"""
+        """load(X,W,U,V) Z1=dYV' Z2=XU
+        dU=X'Z1 dV=Z2'dY dX=dYW'+Z1U' db=dY.sum(axis=0)"""
         input, W, U, V, b = __class__.load_context(ctx)
         X_shape = input.shape
         X = input.reshape(-1, X_shape[-1])
         dY = grad_output.reshape(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
-                ctx.needs_input_grad
+            ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
         Z1, Z2 = [None] * 2
         if X_req_grad or U_req_grad:
@@ -386,13 +407,14 @@ class LightLoRACollection(object):
     @staticmethod
     @custom_bwd
     def backward1_Z1_X_Z2_dY(ctx, grad_output):
-        """load(X,W,U,V) Z1=dYV' Z2=XU dU=X'Z1 dV=Z2'dY dX=dYW'+Z1U' db=dY.sum(axis=0)"""
+        """load(X,W,U,V) Z1=dYV' Z2=XU
+        dU=X'Z1 dV=Z2'dY dX=dYW'+Z1U' db=dY.sum(axis=0)"""
         input, W, U, V, b = __class__.load_context(ctx)
         X_shape = input.shape
         X = input.reshape(-1, X_shape[-1])
         dY = grad_output.reshape(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
-                ctx.needs_input_grad
+            ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
         Z1, Z2 = [None] * 2
         if X_req_grad or U_req_grad:
@@ -419,13 +441,14 @@ class LightLoRACollection(object):
     @staticmethod
     @custom_bwd
     def backward1_Z2_X_Z1_dY(ctx, grad_output):
-        """load(X,W,U,V) Z1=dYV' Z2=XU dU=X'Z1 dV=Z2'dY dX=dYW'+Z1U' db=dY.sum(axis=0)"""
+        """load(X,W,U,V) Z1=dYV' Z2=XU
+        dU=X'Z1 dV=Z2'dY dX=dYW'+Z1U' db=dY.sum(axis=0)"""
         input, W, U, V, b = __class__.load_context(ctx)
         X_shape = input.shape
         X = input.reshape(-1, X_shape[-1])
         dY = grad_output.reshape(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
-                ctx.needs_input_grad
+            ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
         Z1, Z2 = [None] * 2
         if V_req_grad:
@@ -451,13 +474,14 @@ class LightLoRACollection(object):
     @staticmethod
     @custom_bwd
     def backward1_Z2_X_dY_Z1(ctx, grad_output):
-        """load(X,W,U,V) Z1=dYV' Z2=XU dU=X'Z1 dV=Z2'dY dX=dYW'+Z1U' db=dY.sum(axis=0)"""
+        """load(X,W,U,V) Z1=dYV' Z2=XU
+        dU=X'Z1 dV=Z2'dY dX=dYW'+Z1U' db=dY.sum(axis=0)"""
         input, W, U, V, b = __class__.load_context(ctx)
         X_shape = input.shape
         X = input.reshape(-1, X_shape[-1])
         dY = grad_output.reshape(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
-                ctx.needs_input_grad
+            ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
         Z1, Z2 = [None] * 2
         if V_req_grad:
@@ -509,12 +533,13 @@ class LightLoRACollection(object):
     @staticmethod
     @custom_bwd
     def backward2(ctx, grad_output):
-        """load(X,W,U,V) Z1=dYV' Z2=X'dY dU=X'Z1 dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
+        """load(X,W,U,V) Z1=dYV' Z2=X'dY
+        dU=X'Z1 dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
         input, W, U, V, b = __class__.load_context(ctx)
         X = input.reshape(-1, input.shape[-1])
         dY = grad_output.reshape(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
-                ctx.needs_input_grad
+            ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
         if X_req_grad or U_req_grad:
             Z1 = dY.mm(V.t())
@@ -531,13 +556,14 @@ class LightLoRACollection(object):
     @staticmethod
     @custom_bwd
     def backward2_X_dY_Z1_Z2(ctx, grad_output):
-        """load(X,W,U,V) Z1=dYV' Z2=X'dY dU=X'Z1 dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
+        """load(X,W,U,V) Z1=dYV' Z2=X'dY
+        dU=X'Z1 dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
         input, W, U, V, b = __class__.load_context(ctx)
         X_shape = input.shape
         X = input.reshape(-1, X_shape[-1])
         dY = grad_output.reshape(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
-                ctx.needs_input_grad
+            ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
         Z1, Z2 = [None] * 2
         if X_req_grad or U_req_grad:
@@ -564,13 +590,14 @@ class LightLoRACollection(object):
     @staticmethod
     @custom_bwd
     def backward2_X_dY_Z2_Z1(ctx, grad_output):
-        """load(X,W,U,V) Z1=dYV' Z2=X'dY dU=X'Z1 dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
+        """load(X,W,U,V) Z1=dYV' Z2=X'dY
+        dU=X'Z1 dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
         input, W, U, V, b = __class__.load_context(ctx)
         X_shape = input.shape
         X = input.reshape(-1, X_shape[-1])
         dY = grad_output.reshape(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
-                ctx.needs_input_grad
+            ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
         Z1, Z2 = [None] * 2
         if X_req_grad or U_req_grad:
@@ -597,13 +624,14 @@ class LightLoRACollection(object):
     @staticmethod
     @custom_bwd
     def backward2_X_Z1_dY_Z2(ctx, grad_output):
-        """load(X,W,U,V) Z1=dYV' Z2=X'dY dU=X'Z1 dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
+        """load(X,W,U,V) Z1=dYV' Z2=X'dY
+        dU=X'Z1 dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
         input, W, U, V, b = __class__.load_context(ctx)
         X_shape = input.shape
         X = input.reshape(-1, X_shape[-1])
         dY = grad_output.reshape(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
-                ctx.needs_input_grad
+            ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
         Z1, Z2 = [None] * 2
         if X_req_grad or U_req_grad:
@@ -630,13 +658,14 @@ class LightLoRACollection(object):
     @staticmethod
     @custom_bwd
     def backward2_X_Z1_Z2_dY(ctx, grad_output):
-        """load(X,W,U,V) Z1=dYV' Z2=X'dY dU=X'Z1 dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
+        """load(X,W,U,V) Z1=dYV' Z2=X'dY
+        dU=X'Z1 dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
         input, W, U, V, b = __class__.load_context(ctx)
         X_shape = input.shape
         X = input.reshape(-1, X_shape[-1])
         dY = grad_output.reshape(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
-                ctx.needs_input_grad
+            ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
         Z1, Z2 = [None] * 2
         if X_req_grad or U_req_grad:
@@ -663,13 +692,14 @@ class LightLoRACollection(object):
     @staticmethod
     @custom_bwd
     def backward2_X_Z2_dY_Z1(ctx, grad_output):
-        """load(X,W,U,V) Z1=dYV' Z2=X'dY dU=X'Z1 dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
+        """load(X,W,U,V) Z1=dYV' Z2=X'dY
+        dU=X'Z1 dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
         input, W, U, V, b = __class__.load_context(ctx)
         X_shape = input.shape
         X = input.reshape(-1, X_shape[-1])
         dY = grad_output.reshape(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
-                ctx.needs_input_grad
+            ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
         Z1, Z2 = [None] * 2
         if X_req_grad or U_req_grad:
@@ -696,13 +726,14 @@ class LightLoRACollection(object):
     @staticmethod
     @custom_bwd
     def backward2_X_Z2_Z1_dY(ctx, grad_output):
-        """load(X,W,U,V) Z1=dYV' Z2=X'dY dU=X'Z1 dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
+        """load(X,W,U,V) Z1=dYV' Z2=X'dY
+        dU=X'Z1 dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
         input, W, U, V, b = __class__.load_context(ctx)
         X_shape = input.shape
         X = input.reshape(-1, X_shape[-1])
         dY = grad_output.reshape(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
-                ctx.needs_input_grad
+            ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
         Z1, Z2 = [None] * 2
         if X_req_grad or U_req_grad:
@@ -729,13 +760,14 @@ class LightLoRACollection(object):
     @staticmethod
     @custom_bwd
     def backward2_dY_X_Z1_Z2(ctx, grad_output):
-        """load(X,W,U,V) Z1=dYV' Z2=X'dY dU=X'Z1 dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
+        """load(X,W,U,V) Z1=dYV' Z2=X'dY
+        dU=X'Z1 dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
         input, W, U, V, b = __class__.load_context(ctx)
         X_shape = input.shape
         X = input.reshape(-1, X_shape[-1])
         dY = grad_output.reshape(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
-                ctx.needs_input_grad
+            ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
         Z1, Z2 = [None] * 2
         if X_req_grad or U_req_grad:
@@ -762,13 +794,14 @@ class LightLoRACollection(object):
     @staticmethod
     @custom_bwd
     def backward2_dY_X_Z2_Z1(ctx, grad_output):
-        """load(X,W,U,V) Z1=dYV' Z2=X'dY dU=X'Z1 dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
+        """load(X,W,U,V) Z1=dYV' Z2=X'dY
+        dU=X'Z1 dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
         input, W, U, V, b = __class__.load_context(ctx)
         X_shape = input.shape
         X = input.reshape(-1, X_shape[-1])
         dY = grad_output.reshape(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
-                ctx.needs_input_grad
+            ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
         Z1, Z2 = [None] * 2
         if X_req_grad or U_req_grad:
@@ -795,7 +828,8 @@ class LightLoRACollection(object):
     @staticmethod
     @custom_bwd
     def backward2_dY_Z2_X_Z1(ctx, grad_output):
-        """load(X,W,U,V) Z1=dYV' Z2=X'dY dU=X'Z1 dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
+        """load(X,W,U,V) Z1=dYV' Z2=X'dY
+        dU=X'Z1 dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
         input, W, U, V, b = __class__.load_context(ctx)
         X_shape = input.shape
         X = input.reshape(-1, X_shape[-1])
@@ -828,7 +862,8 @@ class LightLoRACollection(object):
     @staticmethod
     @custom_bwd
     def backward2_Z1_X_dY_Z2(ctx, grad_output):
-        """load(X,W,U,V) Z1=dYV' Z2=X'dY dU=X'Z1 dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
+        """load(X,W,U,V) Z1=dYV' Z2=X'dY
+        dU=X'Z1 dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
         input, W, U, V, b = __class__.load_context(ctx)
         X_shape = input.shape
         X = input.reshape(-1, X_shape[-1])
@@ -861,7 +896,8 @@ class LightLoRACollection(object):
     @staticmethod
     @custom_bwd
     def backward2_Z1_X_Z2_dY(ctx, grad_output):
-        """load(X,W,U,V) Z1=dYV' Z2=X'dY dU=X'Z1 dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
+        """load(X,W,U,V) Z1=dYV' Z2=X'dY
+        dU=X'Z1 dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
         input, W, U, V, b = __class__.load_context(ctx)
         X_shape = input.shape
         X = input.reshape(-1, X_shape[-1])
@@ -894,7 +930,8 @@ class LightLoRACollection(object):
     @staticmethod
     @custom_bwd
     def backward2_Z2_X_dY_Z1(ctx, grad_output):
-        """load(X,W,U,V) Z1=dYV' Z2=X'dY dU=X'Z1 dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
+        """load(X,W,U,V) Z1=dYV' Z2=X'dY
+        dU=X'Z1 dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
         input, W, U, V, b = __class__.load_context(ctx)
         X_shape = input.shape
         X = input.reshape(-1, X_shape[-1])
@@ -926,7 +963,8 @@ class LightLoRACollection(object):
     @staticmethod
     @custom_bwd
     def backward2_Z2_X_Z1_dY(ctx, grad_output):
-        """load(X,W,U,V) Z1=dYV' Z2=X'dY dU=X'Z1 dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
+        """load(X,W,U,V) Z1=dYV' Z2=X'dY
+        dU=X'Z1 dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
         input, W, U, V, b = __class__.load_context(ctx)
         X_shape = input.shape
         X = input.reshape(-1, X_shape[-1])
@@ -958,7 +996,8 @@ class LightLoRACollection(object):
     @staticmethod
     @custom_bwd
     def backward2_Z2_dY_X_Z1(ctx, grad_output):
-        """load(X,W,U,V) Z1=dYV' Z2=X'dY dU=X'Z1 dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
+        """load(X,W,U,V) Z1=dYV' Z2=X'dY
+        dU=X'Z1 dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
         input, W, U, V, b = __class__.load_context(ctx)
         X_shape = input.shape
         X = input.reshape(-1, X_shape[-1])
@@ -1016,7 +1055,8 @@ class LightLoRACollection(object):
     @staticmethod
     @custom_bwd
     def backward3(ctx, grad_output):
-        """load(X,W,U,V) Z1=dYV' Z2=X'dY dU=Z2V' dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
+        """load(X,W,U,V) Z1=dYV' Z2=X'dY
+        dU=Z2V' dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
         input, W, U, V, b = __class__.load_context(ctx)
         X = input.reshape(-1, input.shape[-1])
         dY = grad_output.reshape(-1, grad_output.shape[-1])
@@ -1038,7 +1078,8 @@ class LightLoRACollection(object):
     @staticmethod
     @custom_bwd
     def backward3_X_dY_Z1_Z2(ctx, grad_output):
-        """load(X,W,U,V) Z1=dYV' Z2=X'dY dU=Z2V' dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
+        """load(X,W,U,V) Z1=dYV' Z2=X'dY
+        dU=Z2V' dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
         input, W, U, V, b = __class__.load_context(ctx)
         X_shape = input.shape
         X = input.reshape(-1, X_shape[-1])
@@ -1070,7 +1111,8 @@ class LightLoRACollection(object):
     @staticmethod
     @custom_bwd
     def backward3_X_dY_Z2_Z1(ctx, grad_output):
-        """load(X,W,U,V) Z1=dYV' Z2=X'dY dU=Z2V' dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
+        """load(X,W,U,V) Z1=dYV' Z2=X'dY
+        dU=Z2V' dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
         input, W, U, V, b = __class__.load_context(ctx)
         X_shape = input.shape
         X = input.reshape(-1, X_shape[-1])
@@ -1102,7 +1144,8 @@ class LightLoRACollection(object):
     @staticmethod
     @custom_bwd
     def backward3_X_Z1_dY_Z2(ctx, grad_output):
-        """load(X,W,U,V) Z1=dYV' Z2=X'dY dU=Z2V' dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
+        """load(X,W,U,V) Z1=dYV' Z2=X'dY
+        dU=Z2V' dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
         input, W, U, V, b = __class__.load_context(ctx)
         X_shape = input.shape
         X = input.reshape(-1, X_shape[-1])
@@ -1134,13 +1177,14 @@ class LightLoRACollection(object):
     @staticmethod
     @custom_bwd
     def backward3_X_Z1_Z2_dY(ctx, grad_output):
-        """load(X,W,U,V) Z1=dYV' Z2=X'dY dU=Z2V' dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
+        """load(X,W,U,V) Z1=dYV' Z2=X'dY
+        dU=Z2V' dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
         input, W, U, V, b = __class__.load_context(ctx)
         X_shape = input.shape
         X = input.reshape(-1, X_shape[-1])
         dY = grad_output.reshape(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
-                ctx.needs_input_grad
+            ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
         Z1, Z2 = [None] * 2
         if U_req_grad or V_req_grad:
@@ -1166,13 +1210,14 @@ class LightLoRACollection(object):
     @staticmethod
     @custom_bwd
     def backward3_X_Z2_dY_Z1(ctx, grad_output):
-        """load(X,W,U,V) Z1=dYV' Z2=X'dY dU=Z2V' dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
+        """load(X,W,U,V) Z1=dYV' Z2=X'dY
+        dU=Z2V' dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
         input, W, U, V, b = __class__.load_context(ctx)
         X_shape = input.shape
         X = input.reshape(-1, X_shape[-1])
         dY = grad_output.reshape(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
-                ctx.needs_input_grad
+            ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
         Z1, Z2 = [None] * 2
         if U_req_grad or V_req_grad:
@@ -1198,13 +1243,14 @@ class LightLoRACollection(object):
     @staticmethod
     @custom_bwd
     def backward3_X_Z2_Z1_dY(ctx, grad_output):
-        """load(X,W,U,V) Z1=dYV' Z2=X'dY dU=Z2V' dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
+        """load(X,W,U,V) Z1=dYV' Z2=X'dY
+        dU=Z2V' dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
         input, W, U, V, b = __class__.load_context(ctx)
         X_shape = input.shape
         X = input.reshape(-1, X_shape[-1])
         dY = grad_output.reshape(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
-                ctx.needs_input_grad
+            ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
         Z1, Z2 = [None] * 2
         if U_req_grad or V_req_grad:
@@ -1230,13 +1276,14 @@ class LightLoRACollection(object):
     @staticmethod
     @custom_bwd
     def backward3_Z1_X_dY_Z2(ctx, grad_output):
-        """load(X,W,U,V) Z1=dYV' Z2=X'dY dU=Z2V' dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
+        """load(X,W,U,V) Z1=dYV' Z2=X'dY
+        dU=Z2V' dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
         input, W, U, V, b = __class__.load_context(ctx)
         X_shape = input.shape
         X = input.reshape(-1, X_shape[-1])
         dY = grad_output.reshape(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
-                ctx.needs_input_grad
+            ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
         Z1, Z2 = [None] * 2
         if X_req_grad:
@@ -1262,13 +1309,14 @@ class LightLoRACollection(object):
     @staticmethod
     @custom_bwd
     def backward3_Z1_X_Z2_dY(ctx, grad_output):
-        """load(X,W,U,V) Z1=dYV' Z2=X'dY dU=Z2V' dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
+        """load(X,W,U,V) Z1=dYV' Z2=X'dY
+        dU=Z2V' dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
         input, W, U, V, b = __class__.load_context(ctx)
         X_shape = input.shape
         X = input.reshape(-1, X_shape[-1])
         dY = grad_output.reshape(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
-                ctx.needs_input_grad
+            ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
         Z1, Z2 = [None] * 2
         if X_req_grad:
@@ -1320,12 +1368,13 @@ class LightLoRACollection(object):
     @staticmethod
     @custom_bwd
     def backward4(ctx, grad_output):
-        """load(X,W,U,V) Z1=W+UV Z2=X'dY dU=Z2V' dV=U'Z2 dX=dYZ1' db=dY.sum(axis=0)"""
+        """load(X,W,U,V) Z1=W+UV Z2=X'dY
+        dU=Z2V' dV=U'Z2 dX=dYZ1' db=dY.sum(axis=0)"""
         input, W, U, V, b = __class__.load_context(ctx)
         X = input.reshape(-1, input.shape[-1])
         dY = grad_output.reshape(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
-                ctx.needs_input_grad
+            ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
         if U_req_grad or V_req_grad:
             Z = X.t().mm(dY)
@@ -1342,13 +1391,14 @@ class LightLoRACollection(object):
     @staticmethod
     @custom_bwd
     def backward4_X_Z1_dY_Z2(ctx, grad_output):
-        """load(X,W,U,V) Z1=W+UV Z2=X'dY dU=Z2V' dV=U'Z2 dX=dYZ1' db=dY.sum(axis=0)"""
+        """load(X,W,U,V) Z1=W+UV Z2=X'dY
+        dU=Z2V' dV=U'Z2 dX=dYZ1' db=dY.sum(axis=0)"""
         input, W, U, V, b = __class__.load_context(ctx)
         X_shape = input.shape
         X = input.reshape(-1, X_shape[-1])
         dY = grad_output.reshape(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
-                ctx.needs_input_grad
+            ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
         Z1, Z2 = [None] * 2
         if U_req_grad or V_req_grad:
@@ -1372,13 +1422,14 @@ class LightLoRACollection(object):
     @staticmethod
     @custom_bwd
     def backward4_X_Z2_Z1_dY(ctx, grad_output):
-        """load(X,W,U,V) Z1=W+UV Z2=X'dY dU=Z2V' dV=U'Z2 dX=dYZ1' db=dY.sum(axis=0)"""
+        """load(X,W,U,V) Z1=W+UV Z2=X'dY
+        dU=Z2V' dV=U'Z2 dX=dYZ1' db=dY.sum(axis=0)"""
         input, W, U, V, b = __class__.load_context(ctx)
         X_shape = input.shape
         X = input.reshape(-1, X_shape[-1])
         dY = grad_output.reshape(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
-                ctx.needs_input_grad
+            ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
         Z1, Z2 = [None] * 2
         if U_req_grad or V_req_grad:
@@ -1402,13 +1453,14 @@ class LightLoRACollection(object):
     @staticmethod
     @custom_bwd
     def backward4_Z1_X_dY_Z2(ctx, grad_output):
-        """load(X,W,U,V) Z1=W+UV Z2=X'dY dU=Z2V' dV=U'Z2 dX=dYZ1' db=dY.sum(axis=0)"""
+        """load(X,W,U,V) Z1=W+UV Z2=X'dY
+        dU=Z2V' dV=U'Z2 dX=dYZ1' db=dY.sum(axis=0)"""
         input, W, U, V, b = __class__.load_context(ctx)
         X_shape = input.shape
         X = input.reshape(-1, X_shape[-1])
         dY = grad_output.reshape(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
-                ctx.needs_input_grad
+            ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
         Z1, Z2 = [None] * 2
         if X_req_grad:
@@ -1455,12 +1507,13 @@ class LightLoRACollection(object):
     @staticmethod
     @custom_bwd
     def backward5(ctx, grad_output):
-        """load(X,W,U,V) Z1=dYV' Z2=XU Z3=W+UV dU=X'Z1 dV=Z2'dY dX=dYZ3' db=dY.sum(axis=0)"""
+        """load(X,W,U,V) Z1=dYV' Z2=XU Z3=W+UV
+        dU=X'Z1 dV=Z2'dY dX=dYZ3' db=dY.sum(axis=0)"""
         input, W, U, V, b = __class__.load_context(ctx)
         X = input.reshape(-1, input.shape[-1])
         dY = grad_output.reshape(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
-                ctx.needs_input_grad
+            ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
         if U_req_grad:
             grad_U = X.t().mm(dY.mm(V.t()))
@@ -1481,7 +1534,7 @@ class LightLoRACollection(object):
         X = input.reshape(-1, X_shape[-1])
         dY = grad_output.reshape(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
-                ctx.needs_input_grad
+            ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
         Z1, Z2, Z3 = [None] * 3
         if U_req_grad:
@@ -1507,13 +1560,14 @@ class LightLoRACollection(object):
     @staticmethod
     @custom_bwd
     def backward5_Z1_X_Z3_Z2_dY(ctx, grad_output):
-        """load(X,W,U,V) Z1=dYV' Z2=XU Z3=W+UV dU=X'Z1 dV=Z2'dY dX=dYZ3' db=dY.sum(axis=0)"""
+        """load(X,W,U,V) Z1=dYV' Z2=XU Z3=W+UV
+        dU=X'Z1 dV=Z2'dY dX=dYZ3' db=dY.sum(axis=0)"""
         input, W, U, V, b = __class__.load_context(ctx)
         X_shape = input.shape
         X = input.reshape(-1, X_shape[-1])
         dY = grad_output.reshape(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
-                ctx.needs_input_grad
+            ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
         Z1, Z2, Z3 = [None] * 3
         if U_req_grad:
@@ -1539,13 +1593,14 @@ class LightLoRACollection(object):
     @staticmethod
     @custom_bwd
     def backward5_Z1_Z3_X_Z2_dY(ctx, grad_output):
-        """load(X,W,U,V) Z1=dYV' Z2=XU Z3=W+UV dU=X'Z1 dV=Z2'dY dX=dYZ3' db=dY.sum(axis=0)"""
+        """load(X,W,U,V) Z1=dYV' Z2=XU Z3=W+UV
+        dU=X'Z1 dV=Z2'dY dX=dYZ3' db=dY.sum(axis=0)"""
         input, W, U, V, b = __class__.load_context(ctx)
         X_shape = input.shape
         X = input.reshape(-1, X_shape[-1])
         dY = grad_output.reshape(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
-                ctx.needs_input_grad
+            ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
         Z1, Z2, Z3 = [None] * 3
         if U_req_grad:
@@ -1571,13 +1626,14 @@ class LightLoRACollection(object):
     @staticmethod
     @custom_bwd
     def backward5_Z3_Z1_X_Z2_dY(ctx, grad_output):
-        """load(X,W,U,V) Z1=dYV' Z2=XU Z3=W+UV dU=X'Z1 dV=Z2'dY dX=dYZ3' db=dY.sum(axis=0)"""
+        """load(X,W,U,V) Z1=dYV' Z2=XU Z3=W+UV
+        dU=X'Z1 dV=Z2'dY dX=dYZ3' db=dY.sum(axis=0)"""
         input, W, U, V, b = __class__.load_context(ctx)
         X_shape = input.shape
         X = input.reshape(-1, X_shape[-1])
         dY = grad_output.reshape(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
-                ctx.needs_input_grad
+            ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
         Z1, Z2, Z3 = [None] * 3
         if X_req_grad:
@@ -1626,47 +1682,49 @@ class LightLoRACollection(object):
             nflops += 2 * prod(input.shape) * W.shape[1]
         return nflops
 
+
 light_lora_collection = LightLoRACollection()
 
-class LightLoRA(torch.nn.Linear):
-    def __init__(self, in_features, out_features, rank, bias=True, \
-            device=None, dtype=None, fastest: str="flops"):
-        if fastest not in ["flops", "benchmark", "benchmark_short"]:
-            raise ValueError("Possible values for \"fastest\" are " \
-                    "\"flops\", \"benchmark\", \"benchmark_short\"")
-        super().__init__(in_features, out_features, bias, device, dtype)
-        self.fastest = fastest
-        self.U = torch.nn.Parameter(torch.randn(in_features, rank, \
-                device=device, dtype=dtype))
-        self.V = torch.nn.Parameter(torch.randn(rank, out_features, \
-                device=device, dtype=dtype))
-        self.weight.requires_grad = False
-    
-    def forward(self, x):
-        if self.fastest == "flops":
-            path_f, path_b = light_lora_collection.get_best_by_flops(x, \
-                    self.weight.t(), self.U, self.V, self.bias)
-        elif self.fastest == "benchmark":
-            path_f, path_b = light_lora_collection.get_best_by_bench(x, \
-                    self.weight.t(), self.U, self.V, self.bias)
-        elif self.fastest == "benchmark_short":
-            path_f, path_b = light_lora_collection.get_best_by_bench_short(x, \
-                    self.weight.t(), self.U, self.V, self.bias)
-        y = light_lora_collection[path_f, path_b].apply(x, self.weight.t(), \
-                self.U, self.V, self.bias)
-        return y
 
-    def flops(self, x):
-        if self.fastest == "flops":
-            path_f, path_b = light_lora_collection.get_best_by_flops(x, \
-                    self.weight.t(), self.U, self.V, self.bias)
-        elif self.fastest == "benchmark":
-            path_f, path_b = light_lora_collection.get_best_by_bench(x, \
-                    self.weight.t(), self.U, self.V, self.bias)
-        elif self.fastest == "benchmark_short":
-            path_f, path_b = light_lora_collection.get_best_by_bench_short(x, \
-                    self.weight.t(), self.U, self.V, self.bias)
-        nflops = light_lora_collection[path_f, path_b].flops(x, \
-                self.weight.t(), self.U, self.V, self.bias)
-        return nflops
+# class LightLoRA(torch.nn.Linear):
+#     def __init__(self, in_features, out_features, rank, bias=True,
+#                  device=None, dtype=None, fastest: str = "flops"):
+#         if fastest not in ["flops", "benchmark", "benchmark_short"]:
+#             raise ValueError("Possible values for \"fastest\" are " \
+#                     "\"flops\", \"benchmark\", \"benchmark_short\"")
+#         super().__init__(in_features, out_features, bias, device, dtype)
+#         self.fastest = fastest
+#         self.U = torch.nn.Parameter(torch.randn(in_features, rank,
+#                                     device=device, dtype=dtype))
+#         self.V = torch.nn.Parameter(torch.randn(rank, out_features,
+#                                     device=device, dtype=dtype))
+#         self.weight.requires_grad = False
+    
+#     def forward(self, x):
+#         if self.fastest == "flops":
+#             path_f, path_b = light_lora_collection.get_best_by_flops(
+#                 x, self.weight.t(), self.U, self.V, self.bias)
+#         elif self.fastest == "benchmark":
+#             path_f, path_b = light_lora_collection.get_best_by_bench(
+#                 x, self.weight.t(), self.U, self.V, self.bias)
+#         elif self.fastest == "benchmark_short":
+#             path_f, path_b = light_lora_collection.get_best_by_bench_short(
+#                 x, self.weight.t(), self.U, self.V, self.bias)
+#         y = light_lora_collection[path_f, path_b].apply(
+#             x, self.weight.t(), self.U, self.V, self.bias)
+#         return y
+
+#     def flops(self, x):
+#         if self.fastest == "flops":
+#             path_f, path_b = light_lora_collection.get_best_by_flops(x, \
+#                     self.weight.t(), self.U, self.V, self.bias)
+#         elif self.fastest == "benchmark":
+#             path_f, path_b = light_lora_collection.get_best_by_bench(x, \
+#                     self.weight.t(), self.U, self.V, self.bias)
+#         elif self.fastest == "benchmark_short":
+#             path_f, path_b = light_lora_collection.get_best_by_bench_short(x, \
+#                     self.weight.t(), self.U, self.V, self.bias)
+#         nflops = light_lora_collection[path_f, path_b].flops(x, \
+#                 self.weight.t(), self.U, self.V, self.bias)
+#         return nflops
 
