@@ -174,82 +174,36 @@ class LightLoRACollection(object):
         return self.__getitem__((path_f, path_b))
 
     @staticmethod
-    def save_X(X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad):
-        if U_req_grad or V_req_grad:
-            return True
+    def save_context(ctx, input, W, U, V):
+        if U.requires_grad or V.requires_grad:
+            save_X = input
         else:
-            return False
+            save_X = torch.empty_like(input, device="meta")
+        if input.requires_grad:
+            save_W = W
+        else:
+            save_W = None
+        if input.requires_grad or V.requires_grad:
+            save_U = U
+        else:
+            save_U = None
+        if input.requires_grad or U.requires_grad:
+            save_V = V
+        else:
+            save_V = None
+        ctx.save_for_backward(save_X, save_W, save_U, save_V)
 
     @staticmethod
-    def save_W(X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad):
-        if X_req_grad:
-            return True
-        else:
-            return False
-
-    @staticmethod
-    def save_U(X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad):
-        if X_req_grad or V_req_grad:
-            return True
-        else:
-            return False
-
-    @staticmethod
-    def save_V(X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad):
-        if X_req_grad or U_req_grad:
-            return True
-        else:
-            return False
-
-    @staticmethod
-    def save_context(ctx, input, W, U, V, b):
-        saved_tensors = []
-        requires_grad = [input.requires_grad, W.requires_grad,
-                         U.requires_grad, V.requires_grad,
-                         b.requires_grad if b is not None else None]
-        if __class__.save_X(*requires_grad):
-            saved_tensors.append(input)
-        else:
-            saved_tensors.append(torch.empty_like(input, device="meta"))
-        if __class__.save_W(*requires_grad):
-            saved_tensors.append(W)
-        if __class__.save_U(*requires_grad):
-            saved_tensors.append(U)
-        if __class__.save_V(*requires_grad):
-            saved_tensors.append(V)
-        ctx.save_for_backward(*saved_tensors)
-
-    @staticmethod
-    def load_context(ctx):
-        requires_grad = ctx.needs_input_grad
-        saved_tensors = list(ctx.saved_tensors)
-        input = saved_tensors.pop(0)
-        if __class__.save_W(*requires_grad):
-            W = saved_tensors.pop(0)
-        else:
-            W = None
-        if __class__.save_U(*requires_grad):
-            U = saved_tensors.pop(0)
-        else:
-            U = None
-        if __class__.save_V(*requires_grad):
-            V = saved_tensors.pop(0)
-        else:
-            V = None
-        b = None
-        return input, W, U, V, b
-
-    @staticmethod
-    @custom_fwd
     def forward1(ctx, input, W, U, V, b):
         """Y=b+XW+(XU)V save(X,W,U,V)"""
-        X = input.reshape(-1, input.shape[-1])
+        X = input.contiguous().view(-1, input.shape[-1])
         Y_shape = torch.Size(list(input.shape[:-1]) + [W.shape[1]])
-        __class__.save_context(ctx, input, W, U, V, b)
+        __class__.save_context(ctx, input, W, U, V)
+        #ctx.save_for_backward(input, W, U, V, b)
         if b is not None:
-            return (b.addmm(X, W).addmm_(X.mm(U), V)).reshape(Y_shape)
+            return (b.addmm(X, W).addmm_(X.mm(U), V)).view(Y_shape)
         else:
-            return (X.mm(W).addmm_(X.mm(U), V)).reshape(Y_shape)
+            return (X.mm(W).addmm_(X.mm(U), V)).view(Y_shape)
 
     @staticmethod
     def forward1_flops(input, W, U, V, b):
@@ -263,16 +217,15 @@ class LightLoRACollection(object):
         return nflops
 
     @staticmethod
-    @custom_fwd
     def forward2(ctx, input, W, U, V, b):
         """Y=b+X(W+UV) save(X,W,U,V)"""
-        X = input.reshape(-1, input.shape[-1])
+        X = input.contiguous().view(-1, input.shape[-1])
         Y_shape = torch.Size(list(input.shape[:-1]) + [W.shape[1]])
-        __class__.save_context(ctx, input, W, U, V, b)
+        __class__.save_context(ctx, input, W, U, V)
         if b is not None:
-            return b.addmm(X, W.addmm(U, V)).reshape(Y_shape)
+            return b.addmm(X, W.addmm(U, V)).view(Y_shape)
         else:
-            return X.mm(W.addmm(U, V)).reshape(Y_shape)
+            return X.mm(W.addmm(U, V)).view(Y_shape)
 
     @staticmethod
     def forward2_flops(input, W, U, V, b):
@@ -284,16 +237,15 @@ class LightLoRACollection(object):
         return nflops
 
     @staticmethod
-    @custom_fwd
     def forward3(ctx, input, W, U, V, b):
         """Y=b+(XU)V+XW save(X,W,U,V)"""
-        X = input.reshape(-1, input.shape[-1])
+        X = input.contiguous().view(-1, input.shape[-1])
         Y_shape = torch.Size(list(input.shape[:-1]) + [W.shape[1]])
-        __class__.save_context(ctx, input, W, U, V, b)
+        __class__.save_context(ctx, input, W, U, V)
         if b is not None:
-            return b.addmm(X.mm(U), V).addmm_(X, W).reshape(Y_shape)
+            return b.addmm(X.mm(U), V).addmm_(X, W).view(Y_shape)
         else:
-            return X.mm(U).mm(V).addmm_(X, W).reshape(Y_shape)
+            return X.mm(U).mm(V).addmm_(X, W).view(Y_shape)
 
     @staticmethod
     def forward3_flops(input, W, U, V, b):
@@ -307,14 +259,12 @@ class LightLoRACollection(object):
         return nflops
 
     @staticmethod
-    @custom_bwd
     def backward1(ctx, grad_output):
         """load(X,W,U,V) Z1=dYV' Z2=XU
         dU=X'Z1 dV=Z2'dY dX=dYW'+Z1U' db=dY.sum(axis=0)"""
-        input, W, U, V, b = __class__.load_context(ctx)
-        if input is not None:
-            X = input.reshape(-1, input.shape[-1])
-        dY = grad_output.reshape(-1, grad_output.shape[-1])
+        input, W, U, V = ctx.saved_tensors
+        X = input.contiguous().view(-1, input.shape[-1])
+        dY = grad_output.contiguous().view(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
             ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
@@ -325,21 +275,19 @@ class LightLoRACollection(object):
         if V_req_grad:
             grad_V = (X.mm(U)).t().mm(dY)
         if X_req_grad:
-            #grad_input = dY.mm(W.t()).addmm_(Z1, U.t()).reshape(input.shape)
-            grad_input = Z1.mm(U.t()).addmm_(dY, W.t()).reshape(input.shape)
+            grad_input = dY.mm(W.t()).addmm_(Z1, U.t()).view(input.shape)
         if b_req_grad:
             grad_b = dY.sum(axis=0)
         return grad_input, grad_W, grad_U, grad_V, grad_b
 
     @staticmethod
-    @custom_bwd
     def backward1_X_Z1_Z2_dY(ctx, grad_output):
         """load(X,W,U,V) Z1=dYV' Z2=XU
         dU=X'Z1 dV=Z2'dY dX=dYW'+Z1U' db=dY.sum(axis=0)"""
-        input, W, U, V, b = __class__.load_context(ctx)
+        input, W, U, V = ctx.saved_tensors
         X_shape = input.shape
-        X = input.reshape(-1, X_shape[-1])
-        dY = grad_output.reshape(-1, grad_output.shape[-1])
+        X = input.contiguous().view(-1, X_shape[-1])
+        dY = grad_output.contiguous().view(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
             ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
@@ -359,21 +307,20 @@ class LightLoRACollection(object):
         del Z2
         if X_req_grad:
             grad_input.addmm_(dY, W.t())
-            grad_input = grad_input.reshape(X_shape)
+            grad_input = grad_input.view(X_shape)
         if b_req_grad:
             grad_b = dY.sum(axis=0)
         del dY, grad_output
         return grad_input, grad_W, grad_U, grad_V, grad_b
 
     @staticmethod
-    @custom_bwd
     def backward1_X_Z2_Z1_dY(ctx, grad_output):
         """load(X,W,U,V) Z1=dYV' Z2=XU
         dU=X'Z1 dV=Z2'dY dX=dYW'+Z1U' db=dY.sum(axis=0)"""
-        input, W, U, V, b = __class__.load_context(ctx)
+        input, W, U, V = ctx.saved_tensors
         X_shape = input.shape
-        X = input.reshape(-1, X_shape[-1])
-        dY = grad_output.reshape(-1, grad_output.shape[-1])
+        X = input.contiguous().view(-1, X_shape[-1])
+        dY = grad_output.contiguous().view(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
             ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
@@ -393,21 +340,20 @@ class LightLoRACollection(object):
         del Z1
         if X_req_grad:
             grad_input.addmm_(dY, W.t())
-            grad_input = grad_input.reshape(X_shape)
+            grad_input = grad_input.view(X_shape)
         if b_req_grad:
             grad_b = dY.sum(axis=0)
         del dY, grad_output
         return grad_input, grad_W, grad_U, grad_V, grad_b
 
     @staticmethod
-    @custom_bwd
     def backward1_X_Z2_dY_Z1(ctx, grad_output):
         """load(X,W,U,V) Z1=dYV' Z2=XU
         dU=X'Z1 dV=Z2'dY dX=dYW'+Z1U' db=dY.sum(axis=0)"""
-        input, W, U, V, b = __class__.load_context(ctx)
+        input, W, U, V = ctx.saved_tensors
         X_shape = input.shape
-        X = input.reshape(-1, X_shape[-1])
-        dY = grad_output.reshape(-1, grad_output.shape[-1])
+        X = input.contiguous().view(-1, X_shape[-1])
+        dY = grad_output.contiguous().view(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
             ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
@@ -429,19 +375,18 @@ class LightLoRACollection(object):
         del dY, grad_output
         if X_req_grad:
             grad_input.addmm_(Z1, U.t())
-            grad_input = grad_input.reshape(X_shape)
+            grad_input = grad_input.view(X_shape)
         del Z1
         return grad_input, grad_W, grad_U, grad_V, grad_b
 
     @staticmethod
-    @custom_bwd
     def backward1_Z1_X_Z2_dY(ctx, grad_output):
         """load(X,W,U,V) Z1=dYV' Z2=XU
         dU=X'Z1 dV=Z2'dY dX=dYW'+Z1U' db=dY.sum(axis=0)"""
-        input, W, U, V, b = __class__.load_context(ctx)
+        input, W, U, V = ctx.saved_tensors
         X_shape = input.shape
-        X = input.reshape(-1, X_shape[-1])
-        dY = grad_output.reshape(-1, grad_output.shape[-1])
+        X = input.contiguous().view(-1, X_shape[-1])
+        dY = grad_output.contiguous().view(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
             ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
@@ -461,21 +406,20 @@ class LightLoRACollection(object):
         del Z2
         if X_req_grad:
             grad_input.addmm_(dY, W.t())
-            grad_input = grad_input.reshape(X_shape)
+            grad_input = grad_input.view(X_shape)
         if b_req_grad:
             grad_b = dY.sum(axis=0)
         del dY, grad_output
         return grad_input, grad_W, grad_U, grad_V, grad_b
 
     @staticmethod
-    @custom_bwd
     def backward1_Z2_X_Z1_dY(ctx, grad_output):
         """load(X,W,U,V) Z1=dYV' Z2=XU
         dU=X'Z1 dV=Z2'dY dX=dYW'+Z1U' db=dY.sum(axis=0)"""
-        input, W, U, V, b = __class__.load_context(ctx)
+        input, W, U, V = ctx.saved_tensors
         X_shape = input.shape
-        X = input.reshape(-1, X_shape[-1])
-        dY = grad_output.reshape(-1, grad_output.shape[-1])
+        X = input.contiguous().view(-1, X_shape[-1])
+        dY = grad_output.contiguous().view(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
             ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
@@ -494,21 +438,20 @@ class LightLoRACollection(object):
         del Z1
         if X_req_grad:
             grad_input.addmm_(dY, W.t())
-            grad_input = grad_input.reshape(X_shape)
+            grad_input = grad_input.view(X_shape)
         if b_req_grad:
             grad_b = dY.sum(axis=0)
         del dY, grad_output
         return grad_input, grad_W, grad_U, grad_V, grad_b
 
     @staticmethod
-    @custom_bwd
     def backward1_Z2_X_dY_Z1(ctx, grad_output):
         """load(X,W,U,V) Z1=dYV' Z2=XU
         dU=X'Z1 dV=Z2'dY dX=dYW'+Z1U' db=dY.sum(axis=0)"""
-        input, W, U, V, b = __class__.load_context(ctx)
+        input, W, U, V = ctx.saved_tensors
         X_shape = input.shape
-        X = input.reshape(-1, X_shape[-1])
-        dY = grad_output.reshape(-1, grad_output.shape[-1])
+        X = input.contiguous().view(-1, X_shape[-1])
+        dY = grad_output.contiguous().view(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
             ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
@@ -529,7 +472,7 @@ class LightLoRACollection(object):
         del dY, grad_output
         if X_req_grad:
             grad_input.addmm_(Z1, U.t())
-            grad_input = grad_input.reshape(X_shape)
+            grad_input = grad_input.view(X_shape)
         del Z1
         return grad_input, grad_W, grad_U, grad_V, grad_b
 
@@ -560,13 +503,12 @@ class LightLoRACollection(object):
         return nflops
 
     @staticmethod
-    @custom_bwd
     def backward2(ctx, grad_output):
         """load(X,W,U,V) Z1=dYV' Z2=X'dY
         dU=X'Z1 dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
-        input, W, U, V, b = __class__.load_context(ctx)
-        X = input.reshape(-1, input.shape[-1])
-        dY = grad_output.reshape(-1, grad_output.shape[-1])
+        input, W, U, V = ctx.saved_tensors
+        X = input.contiguous().view(-1, input.shape[-1])
+        dY = grad_output.contiguous().view(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
             ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
@@ -577,20 +519,19 @@ class LightLoRACollection(object):
         if V_req_grad:
             grad_V = U.t().mm(X.t().mm(dY))
         if X_req_grad:
-            grad_input = dY.mm(W.t()).addmm_(Z1, U.t()).reshape(input.shape)
+            grad_input = dY.mm(W.t()).addmm_(Z1, U.t()).view(input.shape)
         if b_req_grad:
             grad_b = dY.sum(axis=0)
         return grad_input, grad_W, grad_U, grad_V, grad_b
 
     @staticmethod
-    @custom_bwd
     def backward2_X_dY_Z1_Z2(ctx, grad_output):
         """load(X,W,U,V) Z1=dYV' Z2=X'dY
         dU=X'Z1 dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
-        input, W, U, V, b = __class__.load_context(ctx)
+        input, W, U, V = ctx.saved_tensors
         X_shape = input.shape
-        X = input.reshape(-1, X_shape[-1])
-        dY = grad_output.reshape(-1, grad_output.shape[-1])
+        X = input.contiguous().view(-1, X_shape[-1])
+        dY = grad_output.contiguous().view(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
             ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
@@ -609,7 +550,7 @@ class LightLoRACollection(object):
         del dY, grad_output
         if X_req_grad:
             grad_input.addmm_(Z1, U.t())
-            grad_input = grad_input.reshape(X_shape)
+            grad_input = grad_input.view(X_shape)
         del Z1
         if V_req_grad:
             grad_V = U.t().mm(Z2)
@@ -617,14 +558,13 @@ class LightLoRACollection(object):
         return grad_input, grad_W, grad_U, grad_V, grad_b
 
     @staticmethod
-    @custom_bwd
     def backward2_X_dY_Z2_Z1(ctx, grad_output):
         """load(X,W,U,V) Z1=dYV' Z2=X'dY
         dU=X'Z1 dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
-        input, W, U, V, b = __class__.load_context(ctx)
+        input, W, U, V = ctx.saved_tensors
         X_shape = input.shape
-        X = input.reshape(-1, X_shape[-1])
-        dY = grad_output.reshape(-1, grad_output.shape[-1])
+        X = input.contiguous().view(-1, X_shape[-1])
+        dY = grad_output.contiguous().view(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
             ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
@@ -646,19 +586,18 @@ class LightLoRACollection(object):
         del Z2
         if X_req_grad:
             grad_input.addmm_(Z1, U.t())
-            grad_input = grad_input.reshape(X_shape)
+            grad_input = grad_input.view(X_shape)
         del Z1
         return grad_input, grad_W, grad_U, grad_V, grad_b
 
     @staticmethod
-    @custom_bwd
     def backward2_X_Z1_dY_Z2(ctx, grad_output):
         """load(X,W,U,V) Z1=dYV' Z2=X'dY
         dU=X'Z1 dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
-        input, W, U, V, b = __class__.load_context(ctx)
+        input, W, U, V = ctx.saved_tensors
         X_shape = input.shape
-        X = input.reshape(-1, X_shape[-1])
-        dY = grad_output.reshape(-1, grad_output.shape[-1])
+        X = input.contiguous().view(-1, X_shape[-1])
+        dY = grad_output.contiguous().view(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
             ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
@@ -675,7 +614,7 @@ class LightLoRACollection(object):
         del Z1
         if X_req_grad:
             grad_input.addmm_(dY, W.t())
-            grad_input = grad_input.reshape(X_shape)
+            grad_input = grad_input.view(X_shape)
         if b_req_grad:
             grad_b = dY.sum(axis=0)
         del dY, grad_output
@@ -685,14 +624,13 @@ class LightLoRACollection(object):
         return grad_input, grad_W, grad_U, grad_V, grad_b
 
     @staticmethod
-    @custom_bwd
     def backward2_X_Z1_Z2_dY(ctx, grad_output):
         """load(X,W,U,V) Z1=dYV' Z2=X'dY
         dU=X'Z1 dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
-        input, W, U, V, b = __class__.load_context(ctx)
+        input, W, U, V = ctx.saved_tensors
         X_shape = input.shape
-        X = input.reshape(-1, X_shape[-1])
-        dY = grad_output.reshape(-1, grad_output.shape[-1])
+        X = input.contiguous().view(-1, X_shape[-1])
+        dY = grad_output.contiguous().view(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
             ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
@@ -712,21 +650,20 @@ class LightLoRACollection(object):
         del Z2
         if X_req_grad:
             grad_input.addmm_(dY, W.t())
-            grad_input = grad_input.reshape(X_shape)
+            grad_input = grad_input.view(X_shape)
         if b_req_grad:
             grad_b = dY.sum(axis=0)
         del dY, grad_output
         return grad_input, grad_W, grad_U, grad_V, grad_b
 
     @staticmethod
-    @custom_bwd
     def backward2_X_Z2_dY_Z1(ctx, grad_output):
         """load(X,W,U,V) Z1=dYV' Z2=X'dY
         dU=X'Z1 dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
-        input, W, U, V, b = __class__.load_context(ctx)
+        input, W, U, V = ctx.saved_tensors
         X_shape = input.shape
-        X = input.reshape(-1, X_shape[-1])
-        dY = grad_output.reshape(-1, grad_output.shape[-1])
+        X = input.contiguous().view(-1, X_shape[-1])
+        dY = grad_output.contiguous().view(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
             ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
@@ -748,19 +685,18 @@ class LightLoRACollection(object):
         del dY, grad_output
         if X_req_grad:
             grad_input.addmm_(Z1, U.t())
-            grad_input = grad_input.reshape(X_shape)
+            grad_input = grad_input.view(X_shape)
         del Z1
         return grad_input, grad_W, grad_U, grad_V, grad_b
 
     @staticmethod
-    @custom_bwd
     def backward2_X_Z2_Z1_dY(ctx, grad_output):
         """load(X,W,U,V) Z1=dYV' Z2=X'dY
         dU=X'Z1 dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
-        input, W, U, V, b = __class__.load_context(ctx)
+        input, W, U, V = ctx.saved_tensors
         X_shape = input.shape
-        X = input.reshape(-1, X_shape[-1])
-        dY = grad_output.reshape(-1, grad_output.shape[-1])
+        X = input.contiguous().view(-1, X_shape[-1])
+        dY = grad_output.contiguous().view(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
             ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
@@ -780,21 +716,20 @@ class LightLoRACollection(object):
         del Z1
         if X_req_grad:
             grad_input.addmm_(dY, W.t())
-            grad_input = grad_input.reshape(X_shape)
+            grad_input = grad_input.view(X_shape)
         if b_req_grad:
             grad_b = dY.sum(axis=0)
         del dY, grad_output
         return grad_input, grad_W, grad_U, grad_V, grad_b
 
     @staticmethod
-    @custom_bwd
     def backward2_dY_X_Z1_Z2(ctx, grad_output):
         """load(X,W,U,V) Z1=dYV' Z2=X'dY
         dU=X'Z1 dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
-        input, W, U, V, b = __class__.load_context(ctx)
+        input, W, U, V = ctx.saved_tensors
         X_shape = input.shape
-        X = input.reshape(-1, X_shape[-1])
-        dY = grad_output.reshape(-1, grad_output.shape[-1])
+        X = input.contiguous().view(-1, X_shape[-1])
+        dY = grad_output.contiguous().view(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
             ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
@@ -813,7 +748,7 @@ class LightLoRACollection(object):
         del X, input
         if X_req_grad:
             grad_input.addmm_(Z1, U.t())
-            grad_input = grad_input.reshape(X_shape)
+            grad_input = grad_input.view(X_shape)
         del Z1
         if V_req_grad:
             grad_V = U.t().mm(Z2)
@@ -821,14 +756,13 @@ class LightLoRACollection(object):
         return grad_input, grad_W, grad_U, grad_V, grad_b
 
     @staticmethod
-    @custom_bwd
     def backward2_dY_X_Z2_Z1(ctx, grad_output):
         """load(X,W,U,V) Z1=dYV' Z2=X'dY
         dU=X'Z1 dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
-        input, W, U, V, b = __class__.load_context(ctx)
+        input, W, U, V = ctx.saved_tensors
         X_shape = input.shape
-        X = input.reshape(-1, X_shape[-1])
-        dY = grad_output.reshape(-1, grad_output.shape[-1])
+        X = input.contiguous().view(-1, X_shape[-1])
+        dY = grad_output.contiguous().view(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
             ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
@@ -850,19 +784,18 @@ class LightLoRACollection(object):
         del Z2
         if X_req_grad:
             grad_input.addmm_(Z1, U.t())
-            grad_input = grad_input.reshape(X_shape)
+            grad_input = grad_input.view(X_shape)
         del Z1
         return grad_input, grad_W, grad_U, grad_V, grad_b
 
     @staticmethod
-    @custom_bwd
     def backward2_dY_Z2_X_Z1(ctx, grad_output):
         """load(X,W,U,V) Z1=dYV' Z2=X'dY
         dU=X'Z1 dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
-        input, W, U, V, b = __class__.load_context(ctx)
+        input, W, U, V = ctx.saved_tensors
         X_shape = input.shape
-        X = input.reshape(-1, X_shape[-1])
-        dY = grad_output.reshape(-1, grad_output.shape[-1])
+        X = input.contiguous().view(-1, X_shape[-1])
+        dY = grad_output.contiguous().view(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
                 ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
@@ -884,19 +817,18 @@ class LightLoRACollection(object):
         del X, input
         if X_req_grad:
             grad_input.addmm_(Z1, U.t())
-            grad_input = grad_input.reshape(X_shape)
+            grad_input = grad_input.view(X_shape)
         del Z1
         return grad_input, grad_W, grad_U, grad_V, grad_b
 
     @staticmethod
-    @custom_bwd
     def backward2_Z1_X_dY_Z2(ctx, grad_output):
         """load(X,W,U,V) Z1=dYV' Z2=X'dY
         dU=X'Z1 dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
-        input, W, U, V, b = __class__.load_context(ctx)
+        input, W, U, V = ctx.saved_tensors
         X_shape = input.shape
-        X = input.reshape(-1, X_shape[-1])
-        dY = grad_output.reshape(-1, grad_output.shape[-1])
+        X = input.contiguous().view(-1, X_shape[-1])
+        dY = grad_output.contiguous().view(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
                 ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
@@ -913,7 +845,7 @@ class LightLoRACollection(object):
         del X, input
         if X_req_grad:
             grad_input.addmm_(dY, W.t())
-            grad_input = grad_input.reshape(X_shape)
+            grad_input = grad_input.view(X_shape)
         if b_req_grad:
             grad_b = dY.sum(axis=0)
         del dY, grad_output
@@ -923,14 +855,13 @@ class LightLoRACollection(object):
         return grad_input, grad_W, grad_U, grad_V, grad_b
 
     @staticmethod
-    @custom_bwd
     def backward2_Z1_X_Z2_dY(ctx, grad_output):
         """load(X,W,U,V) Z1=dYV' Z2=X'dY
         dU=X'Z1 dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
-        input, W, U, V, b = __class__.load_context(ctx)
+        input, W, U, V = ctx.saved_tensors
         X_shape = input.shape
-        X = input.reshape(-1, X_shape[-1])
-        dY = grad_output.reshape(-1, grad_output.shape[-1])
+        X = input.contiguous().view(-1, X_shape[-1])
+        dY = grad_output.contiguous().view(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
                 ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
@@ -950,21 +881,20 @@ class LightLoRACollection(object):
         del Z2
         if X_req_grad:
             grad_input.addmm_(dY, W.t())
-            grad_input = grad_input.reshape(X_shape)
+            grad_input = grad_input.view(X_shape)
         if b_req_grad:
             grad_b = dY.sum(axis=0)
         del dY, grad_output
         return grad_input, grad_W, grad_U, grad_V, grad_b
 
     @staticmethod
-    @custom_bwd
     def backward2_Z2_X_dY_Z1(ctx, grad_output):
         """load(X,W,U,V) Z1=dYV' Z2=X'dY
         dU=X'Z1 dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
-        input, W, U, V, b = __class__.load_context(ctx)
+        input, W, U, V = ctx.saved_tensors
         X_shape = input.shape
-        X = input.reshape(-1, X_shape[-1])
-        dY = grad_output.reshape(-1, grad_output.shape[-1])
+        X = input.contiguous().view(-1, X_shape[-1])
+        dY = grad_output.contiguous().view(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
                 ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
@@ -985,19 +915,18 @@ class LightLoRACollection(object):
         del dY, grad_output
         if X_req_grad:
             grad_input.addmm_(Z1, U.t())
-            grad_input = grad_input.reshape(X_shape)
+            grad_input = grad_input.view(X_shape)
         del Z1
         return grad_input, grad_W, grad_U, grad_V, grad_b
 
     @staticmethod
-    @custom_bwd
     def backward2_Z2_X_Z1_dY(ctx, grad_output):
         """load(X,W,U,V) Z1=dYV' Z2=X'dY
         dU=X'Z1 dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
-        input, W, U, V, b = __class__.load_context(ctx)
+        input, W, U, V = ctx.saved_tensors
         X_shape = input.shape
-        X = input.reshape(-1, X_shape[-1])
-        dY = grad_output.reshape(-1, grad_output.shape[-1])
+        X = input.contiguous().view(-1, X_shape[-1])
+        dY = grad_output.contiguous().view(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
                 ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
@@ -1016,21 +945,20 @@ class LightLoRACollection(object):
         del Z1
         if X_req_grad:
             grad_input.addmm_(dY, W.t())
-            grad_input = grad_input.reshape(X_shape)
+            grad_input = grad_input.view(X_shape)
         if b_req_grad:
             grad_b = dY.sum(axis=0)
         del dY, grad_output
         return grad_input, grad_W, grad_U, grad_V, grad_b
 
     @staticmethod
-    @custom_bwd
     def backward2_Z2_dY_X_Z1(ctx, grad_output):
         """load(X,W,U,V) Z1=dYV' Z2=X'dY
         dU=X'Z1 dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
-        input, W, U, V, b = __class__.load_context(ctx)
+        input, W, U, V = ctx.saved_tensors
         X_shape = input.shape
-        X = input.reshape(-1, X_shape[-1])
-        dY = grad_output.reshape(-1, grad_output.shape[-1])
+        X = input.contiguous().view(-1, X_shape[-1])
+        dY = grad_output.contiguous().view(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
                 ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
@@ -1051,7 +979,7 @@ class LightLoRACollection(object):
         del X, input
         if X_req_grad:
             grad_input.addmm_(Z1, U.t())
-            grad_input = grad_input.reshape(X_shape)
+            grad_input = grad_input.view(X_shape)
         del Z1
         return grad_input, grad_W, grad_U, grad_V, grad_b
 
@@ -1082,13 +1010,12 @@ class LightLoRACollection(object):
         return nflops
 
     @staticmethod
-    @custom_bwd
     def backward3(ctx, grad_output):
         """load(X,W,U,V) Z1=dYV' Z2=X'dY
         dU=Z2V' dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
-        input, W, U, V, b = __class__.load_context(ctx)
-        X = input.reshape(-1, input.shape[-1])
-        dY = grad_output.reshape(-1, grad_output.shape[-1])
+        input, W, U, V = ctx.saved_tensors
+        X = input.contiguous().view(-1, input.shape[-1])
+        dY = grad_output.contiguous().view(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
                 ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
@@ -1099,20 +1026,19 @@ class LightLoRACollection(object):
         if V_req_grad:
             grad_V = (U.t()).mm(Z)
         if X_req_grad:
-            grad_input = dY.mm(W.t()).addmm_(dY.mm(V.t()), U.t()).reshape(input.shape)
+            grad_input = dY.mm(W.t()).addmm_(dY.mm(V.t()), U.t()).view(input.shape)
         if b_req_grad:
             grad_b = dY.sum(axis=0)
         return grad_input, grad_W, grad_U, grad_V, grad_b
 
     @staticmethod
-    @custom_bwd
     def backward3_X_dY_Z1_Z2(ctx, grad_output):
         """load(X,W,U,V) Z1=dYV' Z2=X'dY
         dU=Z2V' dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
-        input, W, U, V, b = __class__.load_context(ctx)
+        input, W, U, V = ctx.saved_tensors
         X_shape = input.shape
-        X = input.reshape(-1, X_shape[-1])
-        dY = grad_output.reshape(-1, grad_output.shape[-1])
+        X = input.contiguous().view(-1, X_shape[-1])
+        dY = grad_output.contiguous().view(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
                 ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
@@ -1128,7 +1054,7 @@ class LightLoRACollection(object):
         del dY, grad_output
         if X_req_grad:
             grad_input.addmm_(Z1, U.t())
-            grad_input = grad_input.reshape(X_shape)
+            grad_input = grad_input.view(X_shape)
         del Z1
         if U_req_grad:
             grad_U = Z2.mm(V.t())
@@ -1138,14 +1064,13 @@ class LightLoRACollection(object):
         return grad_input, grad_W, grad_U, grad_V, grad_b
 
     @staticmethod
-    @custom_bwd
     def backward3_X_dY_Z2_Z1(ctx, grad_output):
         """load(X,W,U,V) Z1=dYV' Z2=X'dY
         dU=Z2V' dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
-        input, W, U, V, b = __class__.load_context(ctx)
+        input, W, U, V = ctx.saved_tensors
         X_shape = input.shape
-        X = input.reshape(-1, X_shape[-1])
-        dY = grad_output.reshape(-1, grad_output.shape[-1])
+        X = input.contiguous().view(-1, X_shape[-1])
+        dY = grad_output.contiguous().view(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
                 ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
@@ -1166,19 +1091,18 @@ class LightLoRACollection(object):
         del Z2
         if X_req_grad:
             grad_input.addmm_(Z1, U.t())
-            grad_input = grad_input.reshape(X_shape)
+            grad_input = grad_input.view(X_shape)
         del Z1
         return grad_input, grad_W, grad_U, grad_V, grad_b
 
     @staticmethod
-    @custom_bwd
     def backward3_X_Z1_dY_Z2(ctx, grad_output):
         """load(X,W,U,V) Z1=dYV' Z2=X'dY
         dU=Z2V' dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
-        input, W, U, V, b = __class__.load_context(ctx)
+        input, W, U, V = ctx.saved_tensors
         X_shape = input.shape
-        X = input.reshape(-1, X_shape[-1])
-        dY = grad_output.reshape(-1, grad_output.shape[-1])
+        X = input.contiguous().view(-1, X_shape[-1])
+        dY = grad_output.contiguous().view(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
                 ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
@@ -1192,7 +1116,7 @@ class LightLoRACollection(object):
         del Z1
         if X_req_grad:
             grad_input.addmm_(dY, W.t())
-            grad_input = grad_input.reshape(X_shape)
+            grad_input = grad_input.view(X_shape)
         if b_req_grad:
             grad_b = dY.sum(axis=0)
         del dY, grad_output
@@ -1204,14 +1128,13 @@ class LightLoRACollection(object):
         return grad_input, grad_W, grad_U, grad_V, grad_b
 
     @staticmethod
-    @custom_bwd
     def backward3_X_Z1_Z2_dY(ctx, grad_output):
         """load(X,W,U,V) Z1=dYV' Z2=X'dY
         dU=Z2V' dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
-        input, W, U, V, b = __class__.load_context(ctx)
+        input, W, U, V = ctx.saved_tensors
         X_shape = input.shape
-        X = input.reshape(-1, X_shape[-1])
-        dY = grad_output.reshape(-1, grad_output.shape[-1])
+        X = input.contiguous().view(-1, X_shape[-1])
+        dY = grad_output.contiguous().view(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
             ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
@@ -1230,21 +1153,20 @@ class LightLoRACollection(object):
         del Z2
         if X_req_grad:
             grad_input.addmm_(dY, W.t())
-            grad_input = grad_input.reshape(X_shape)
+            grad_input = grad_input.view(X_shape)
         if b_req_grad:
             grad_b = dY.sum(axis=0)
         del dY, grad_output
         return grad_input, grad_W, grad_U, grad_V, grad_b
 
     @staticmethod
-    @custom_bwd
     def backward3_X_Z2_dY_Z1(ctx, grad_output):
         """load(X,W,U,V) Z1=dYV' Z2=X'dY
         dU=Z2V' dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
-        input, W, U, V, b = __class__.load_context(ctx)
+        input, W, U, V = ctx.saved_tensors
         X_shape = input.shape
-        X = input.reshape(-1, X_shape[-1])
-        dY = grad_output.reshape(-1, grad_output.shape[-1])
+        X = input.contiguous().view(-1, X_shape[-1])
+        dY = grad_output.contiguous().view(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
             ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
@@ -1265,19 +1187,18 @@ class LightLoRACollection(object):
         del dY, grad_output
         if X_req_grad:
             grad_input.addmm_(Z1, U.t())
-            grad_input = grad_input.reshape(X_shape)
+            grad_input = grad_input.view(X_shape)
         del Z1
         return grad_input, grad_W, grad_U, grad_V, grad_b
 
     @staticmethod
-    @custom_bwd
     def backward3_X_Z2_Z1_dY(ctx, grad_output):
         """load(X,W,U,V) Z1=dYV' Z2=X'dY
         dU=Z2V' dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
-        input, W, U, V, b = __class__.load_context(ctx)
+        input, W, U, V = ctx.saved_tensors
         X_shape = input.shape
-        X = input.reshape(-1, X_shape[-1])
-        dY = grad_output.reshape(-1, grad_output.shape[-1])
+        X = input.contiguous().view(-1, X_shape[-1])
+        dY = grad_output.contiguous().view(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
             ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
@@ -1296,21 +1217,20 @@ class LightLoRACollection(object):
         del Z1
         if X_req_grad:
             grad_input.addmm_(dY, W.t())
-            grad_input = grad_input.reshape(X_shape)
+            grad_input = grad_input.view(X_shape)
         if b_req_grad:
             grad_b = dY.sum(axis=0)
         del dY, grad_output
         return grad_input, grad_W, grad_U, grad_V, grad_b
 
     @staticmethod
-    @custom_bwd
     def backward3_Z1_X_dY_Z2(ctx, grad_output):
         """load(X,W,U,V) Z1=dYV' Z2=X'dY
         dU=Z2V' dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
-        input, W, U, V, b = __class__.load_context(ctx)
+        input, W, U, V = ctx.saved_tensors
         X_shape = input.shape
-        X = input.reshape(-1, X_shape[-1])
-        dY = grad_output.reshape(-1, grad_output.shape[-1])
+        X = input.contiguous().view(-1, X_shape[-1])
+        dY = grad_output.contiguous().view(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
             ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
@@ -1324,7 +1244,7 @@ class LightLoRACollection(object):
         del X, input
         if X_req_grad:
             grad_input.addmm_(dY, W.t())
-            grad_input = grad_input.reshape(X_shape)
+            grad_input = grad_input.view(X_shape)
         if b_req_grad:
             grad_b = dY.sum(axis=0)
         del dY, grad_output
@@ -1336,14 +1256,13 @@ class LightLoRACollection(object):
         return grad_input, grad_W, grad_U, grad_V, grad_b
 
     @staticmethod
-    @custom_bwd
     def backward3_Z1_X_Z2_dY(ctx, grad_output):
         """load(X,W,U,V) Z1=dYV' Z2=X'dY
         dU=Z2V' dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
-        input, W, U, V, b = __class__.load_context(ctx)
+        input, W, U, V = ctx.saved_tensors
         X_shape = input.shape
-        X = input.reshape(-1, X_shape[-1])
-        dY = grad_output.reshape(-1, grad_output.shape[-1])
+        X = input.contiguous().view(-1, X_shape[-1])
+        dY = grad_output.contiguous().view(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
             ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
@@ -1362,7 +1281,7 @@ class LightLoRACollection(object):
         del Z2
         if X_req_grad:
             grad_input.addmm_(dY, W.t())
-            grad_input = grad_input.reshape(X_shape)
+            grad_input = grad_input.view(X_shape)
         if b_req_grad:
             grad_b = dY.sum(axis=0)
         del dY, grad_output
@@ -1395,13 +1314,12 @@ class LightLoRACollection(object):
         return nflops
 
     @staticmethod
-    @custom_bwd
     def backward4(ctx, grad_output):
         """load(X,W,U,V) Z1=W+UV Z2=X'dY
         dU=Z2V' dV=U'Z2 dX=dYZ1' db=dY.sum(axis=0)"""
-        input, W, U, V, b = __class__.load_context(ctx)
-        X = input.reshape(-1, input.shape[-1])
-        dY = grad_output.reshape(-1, grad_output.shape[-1])
+        input, W, U, V = ctx.saved_tensors
+        X = input.contiguous().view(-1, input.shape[-1])
+        dY = grad_output.contiguous().view(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
             ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
@@ -1412,20 +1330,19 @@ class LightLoRACollection(object):
         if V_req_grad:
             grad_V = (U.t()).mm(Z)
         if X_req_grad:
-            grad_input = dY.mm((W.addmm(U, V)).t()).reshape(input.shape)
+            grad_input = dY.mm((W.addmm(U, V)).t()).view(input.shape)
         if b_req_grad:
             grad_b = dY.sum(axis=0)
         return grad_input, grad_W, grad_U, grad_V, grad_b
 
     @staticmethod
-    @custom_bwd
     def backward4_X_Z1_dY_Z2(ctx, grad_output):
         """load(X,W,U,V) Z1=W+UV Z2=X'dY
         dU=Z2V' dV=U'Z2 dX=dYZ1' db=dY.sum(axis=0)"""
-        input, W, U, V, b = __class__.load_context(ctx)
+        input, W, U, V = ctx.saved_tensors
         X_shape = input.shape
-        X = input.reshape(-1, X_shape[-1])
-        dY = grad_output.reshape(-1, grad_output.shape[-1])
+        X = input.contiguous().view(-1, X_shape[-1])
+        dY = grad_output.contiguous().view(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
             ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
@@ -1436,7 +1353,7 @@ class LightLoRACollection(object):
         if X_req_grad:
             Z1 = W.addmm(U, V)
             grad_input = dY.mm(Z1.t())
-            grad_input = grad_input.reshape(X_shape)
+            grad_input = grad_input.view(X_shape)
         del Z1
         if b_req_grad:
             grad_b = dY.sum(axis=0)
@@ -1449,14 +1366,13 @@ class LightLoRACollection(object):
         return grad_input, grad_W, grad_U, grad_V, grad_b
 
     @staticmethod
-    @custom_bwd
     def backward4_X_Z2_Z1_dY(ctx, grad_output):
         """load(X,W,U,V) Z1=W+UV Z2=X'dY
         dU=Z2V' dV=U'Z2 dX=dYZ1' db=dY.sum(axis=0)"""
-        input, W, U, V, b = __class__.load_context(ctx)
+        input, W, U, V = ctx.saved_tensors
         X_shape = input.shape
-        X = input.reshape(-1, X_shape[-1])
-        dY = grad_output.reshape(-1, grad_output.shape[-1])
+        X = input.contiguous().view(-1, X_shape[-1])
+        dY = grad_output.contiguous().view(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
             ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
@@ -1472,7 +1388,7 @@ class LightLoRACollection(object):
         if X_req_grad:
             Z1 = W.addmm(U, V)
             grad_input = dY.mm(Z1.t())
-            grad_input = grad_input.reshape(X_shape)
+            grad_input = grad_input.view(X_shape)
         del Z1
         if b_req_grad:
             grad_b = dY.sum(axis=0)
@@ -1480,14 +1396,13 @@ class LightLoRACollection(object):
         return grad_input, grad_W, grad_U, grad_V, grad_b
 
     @staticmethod
-    @custom_bwd
     def backward4_Z1_X_dY_Z2(ctx, grad_output):
         """load(X,W,U,V) Z1=W+UV Z2=X'dY
         dU=Z2V' dV=U'Z2 dX=dYZ1' db=dY.sum(axis=0)"""
-        input, W, U, V, b = __class__.load_context(ctx)
+        input, W, U, V = ctx.saved_tensors
         X_shape = input.shape
-        X = input.reshape(-1, X_shape[-1])
-        dY = grad_output.reshape(-1, grad_output.shape[-1])
+        X = input.contiguous().view(-1, X_shape[-1])
+        dY = grad_output.contiguous().view(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
             ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
@@ -1495,7 +1410,7 @@ class LightLoRACollection(object):
         if X_req_grad:
             Z1 = W.addmm(U, V)
             grad_input = dY.mm(Z1.t())
-            grad_input = grad_input.reshape(X_shape)
+            grad_input = grad_input.view(X_shape)
         del Z1
         if U_req_grad or V_req_grad:
             Z2 = X.t().mm(dY)
@@ -1534,13 +1449,12 @@ class LightLoRACollection(object):
         return nflops
 
     @staticmethod
-    @custom_bwd
     def backward5(ctx, grad_output):
         """load(X,W,U,V) Z1=dYV' Z2=XU Z3=W+UV
         dU=X'Z1 dV=Z2'dY dX=dYZ3' db=dY.sum(axis=0)"""
-        input, W, U, V, b = __class__.load_context(ctx)
-        X = input.reshape(-1, input.shape[-1])
-        dY = grad_output.reshape(-1, grad_output.shape[-1])
+        input, W, U, V = ctx.saved_tensors
+        X = input.contiguous().view(-1, input.shape[-1])
+        dY = grad_output.contiguous().view(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
             ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
@@ -1549,19 +1463,18 @@ class LightLoRACollection(object):
         if V_req_grad:
             grad_V = (X.mm(U)).t().mm(dY)
         if X_req_grad:
-            grad_input = dY.mm((W.addmm(U, V)).t()).reshape(input.shape)
+            grad_input = dY.mm((W.addmm(U, V)).t()).view(input.shape)
         if b_req_grad:
             grad_b = dY.sum(axis=0)
         return grad_input, grad_W, grad_U, grad_V, grad_b
 
     @staticmethod
-    @custom_bwd
     def backward5_Z1_X_Z2_Z3_dY(ctx, grad_output):
         """load(X,W,U,V) Z1=dYV' Z2=XU Z3=W+UV dU=X'Z1 dV=Z2'dY dX=dYZ3' db=dY.sum(axis=0)"""
-        input, W, U, V, b = __class__.load_context(ctx)
+        input, W, U, V = ctx.saved_tensors
         X_shape = input.shape
-        X = input.reshape(-1, X_shape[-1])
-        dY = grad_output.reshape(-1, grad_output.shape[-1])
+        X = input.contiguous().view(-1, X_shape[-1])
+        dY = grad_output.contiguous().view(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
             ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
@@ -1579,7 +1492,7 @@ class LightLoRACollection(object):
         if X_req_grad:
             Z3 = W.addmm(U, V)
             grad_input = dY.mm(Z3.t())
-            grad_input = grad_input.reshape(X_shape)
+            grad_input = grad_input.view(X_shape)
         del Z3
         if b_req_grad:
             grad_b = dY.sum(axis=0)
@@ -1587,14 +1500,13 @@ class LightLoRACollection(object):
         return grad_input, grad_W, grad_U, grad_V, grad_b
 
     @staticmethod
-    @custom_bwd
     def backward5_Z1_X_Z3_Z2_dY(ctx, grad_output):
         """load(X,W,U,V) Z1=dYV' Z2=XU Z3=W+UV
         dU=X'Z1 dV=Z2'dY dX=dYZ3' db=dY.sum(axis=0)"""
-        input, W, U, V, b = __class__.load_context(ctx)
+        input, W, U, V = ctx.saved_tensors
         X_shape = input.shape
-        X = input.reshape(-1, X_shape[-1])
-        dY = grad_output.reshape(-1, grad_output.shape[-1])
+        X = input.contiguous().view(-1, X_shape[-1])
+        dY = grad_output.contiguous().view(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
             ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
@@ -1609,7 +1521,7 @@ class LightLoRACollection(object):
         if X_req_grad:
             Z3 = W.addmm(U, V)
             grad_input = dY.mm(Z3.t())
-            grad_input = grad_input.reshape(X_shape)
+            grad_input = grad_input.view(X_shape)
         del Z3
         if V_req_grad:
             grad_V = Z2.t().mm(dY)
@@ -1620,14 +1532,13 @@ class LightLoRACollection(object):
         return grad_input, grad_W, grad_U, grad_V, grad_b
 
     @staticmethod
-    @custom_bwd
     def backward5_Z1_Z3_X_Z2_dY(ctx, grad_output):
         """load(X,W,U,V) Z1=dYV' Z2=XU Z3=W+UV
         dU=X'Z1 dV=Z2'dY dX=dYZ3' db=dY.sum(axis=0)"""
-        input, W, U, V, b = __class__.load_context(ctx)
+        input, W, U, V = ctx.saved_tensors
         X_shape = input.shape
-        X = input.reshape(-1, X_shape[-1])
-        dY = grad_output.reshape(-1, grad_output.shape[-1])
+        X = input.contiguous().view(-1, X_shape[-1])
+        dY = grad_output.contiguous().view(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
             ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
@@ -1639,7 +1550,7 @@ class LightLoRACollection(object):
         if X_req_grad:
             Z3 = W.addmm(U, V)
             grad_input = dY.mm(Z3.t())
-            grad_input = grad_input.reshape(X_shape)
+            grad_input = grad_input.view(X_shape)
         del Z3
         if V_req_grad:
             Z2 = X.mm(U)
@@ -1653,14 +1564,13 @@ class LightLoRACollection(object):
         return grad_input, grad_W, grad_U, grad_V, grad_b
 
     @staticmethod
-    @custom_bwd
     def backward5_Z3_Z1_X_Z2_dY(ctx, grad_output):
         """load(X,W,U,V) Z1=dYV' Z2=XU Z3=W+UV
         dU=X'Z1 dV=Z2'dY dX=dYZ3' db=dY.sum(axis=0)"""
-        input, W, U, V, b = __class__.load_context(ctx)
+        input, W, U, V = ctx.saved_tensors
         X_shape = input.shape
-        X = input.reshape(-1, X_shape[-1])
-        dY = grad_output.reshape(-1, grad_output.shape[-1])
+        X = input.contiguous().view(-1, X_shape[-1])
+        dY = grad_output.contiguous().view(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
             ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
@@ -1668,7 +1578,7 @@ class LightLoRACollection(object):
         if X_req_grad:
             Z3 = W.addmm(U, V)
             grad_input = dY.mm(Z3.t())
-            grad_input = grad_input.reshape(X_shape)
+            grad_input = grad_input.view(X_shape)
         del Z3
         if U_req_grad:
             Z1 = dY.mm(V.t())

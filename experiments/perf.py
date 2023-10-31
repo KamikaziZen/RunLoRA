@@ -127,6 +127,9 @@ def main(args):
     if b is not None:
         glbls = {'x': x, 'w': w, 'u': u, 'v': v, 'b': b}
         stmt_all = [
+            "(x@u)",
+            "(w+u@v)",
+            "w.addmm(u, v)",
             "(x@w+(x@u)@v+b)",
             "xx=x.reshape(-1,x.shape[-1]); (b.addmm("
             "xx,w).addmm_(xx.mm(u), v).reshape(*x.shape[:-1],w.shape[-1]))",
@@ -137,6 +140,9 @@ def main(args):
     else:
         glbls = {'x': x, 'w': w, 'u': u, 'v': v}
         stmt_all = [
+            "(x@u)",
+            "(w+u@v)",
+            "w.addmm(u, v)",
             "(x@w+(x@u)@v)",
             "xx=x.reshape(-1,x.shape[-1]); (xx.mm(w)"
             ".addmm_(xx.mm(u),v).reshape(*x.shape[:-1],w.shape[-1]))",
@@ -154,7 +160,7 @@ def main(args):
         timestats = mytimeit(stmt2, glbls)
         rows.append({'statement': stmt2,
                      'path_f': 'statement',
-                     'path_b': 'autorgrad',
+                     'path_b': 'autograd',
                      **vars(args), **timestats})
 
     # Find the fastest forward+backward
