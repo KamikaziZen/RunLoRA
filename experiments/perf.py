@@ -39,7 +39,7 @@ def mytimeit(statement, glbls):
     if 'b' in glbls and glbls['b']:
         glbls['b'].grad = None
     bench = benchmark.Timer(stmt=statement, globals=glbls)
-    measure_warmup = bench.blocked_autorange(min_run_time=1.0)
+    _ = bench.blocked_autorange(min_run_time=1.0)
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats()
     measure = bench.blocked_autorange(min_run_time=3.0)
@@ -145,10 +145,15 @@ def main(args):
 
     for stmt in stmt_all:
         timestats = mytimeit(stmt, glbls)
-        rows.append({'statement': stmt, **vars(args), **timestats})
+        rows.append({'statement': stmt,
+                     'path_f': 'statement',
+                     **vars(args), **timestats})
         stmt2 = stmt + ".sum().backward()"
         timestats = mytimeit(stmt2, glbls)
-        rows.append({'statement': stmt2, **vars(args), **timestats})
+        rows.append({'statement': stmt2,
+                     'path_f': 'statement',
+                     'path_b': 'autorgrad',
+                     **vars(args), **timestats})
 
     # Find the fastest forward+backward
     if args.short == "True":
@@ -157,13 +162,22 @@ def main(args):
     else:
         fwd_keys = light_lora_collection.forward_keys
         bwd_keys = light_lora_collection.backward_keys
+
+    # forward1 and backward1 as a baseline
     fast_f = fwd_keys[0]
     fast_b = bwd_keys[0]
+    timestats = mytimeit_lightlora(*variables,
+                                   path_f=fast_f, path_b=fast_b)
+    rows.append({'path_f': fast_f, 'path_b': fast_b,
+                 'statement': "light_lora.apply(x, w, u, v, b)"
+                 ".sum().backward()",
+                 **vars(args), **timestats})
+
     fast_mean = torch.inf
     for path_f in fwd_keys:
         timestats = mytimeit_lightlora_fwd(*variables,
                                            path_f=path_f, path_b=fast_b)
-        rows.append({'path_f': path_f, 'path_b': fast_b,
+        rows.append({'path_f': path_f,  # no backward path
                      'statement': "light_lora.apply(x, w, u, v, b)",
                      **vars(args), **timestats})
         if fast_mean > timestats['mean_time']:
@@ -184,9 +198,13 @@ def main(args):
     df = pd.DataFrame.from_records(rows).drop(columns="out")
     df.sort_values(['mean_time', 'max_mem_MB'],
                    ascending=[True, True], inplace=True)
+    # removing duplicates with a forward1-backward1 baseline if any
+    df.drop_duplicates(subset=['statement', 'path_f', 'path_b'],
+                       keep='last', inplace=True)
     df.to_csv(args.out)
     print(args)
-    print(df[['statement', 'mean_time', 'max_mem_MB', 'path_f', 'path_b', 'msrs/runs']])
+    print(df[['statement', 'mean_time', 'max_mem_MB',
+              'path_f', 'path_b', 'msrs/runs']])
 
 
 if __name__ == "__main__":
