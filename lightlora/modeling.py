@@ -23,6 +23,7 @@ class LoRALayer():
 
 
 class LightLoRALinear(nn.Module, LoRALayer):
+    # TODO: dropout
     def __init__(
         self,
         in_features: int,
@@ -72,9 +73,9 @@ class LightLoRALinear(nn.Module, LoRALayer):
         nn.init.kaiming_uniform_(self.lora_U, a=math.sqrt(5))
         nn.init.zeros_(self.lora_V)
 
-    def train(self, mode: bool = True):
-        nn.Linear.train(self, mode)
-        # set lora dropout here to train?
+    # def train(self, mode: bool = True):
+    #     nn.Linear.train(self, mode)
+    #     # set lora dropout here to train?
 
     def forward(self, x: torch.Tensor):
         # TODO: scaling
@@ -82,7 +83,7 @@ class LightLoRALinear(nn.Module, LoRALayer):
                                     self.lora_U, self.lora_V, self.bias)
 
     def extra_repr(self) -> str:
-        return f'in_features={self.in_features}, out_features={self.out_features},' \
+        return f'in_features={self.in_features}, out_features={self.out_features}, ' \
                f'bias={self.bias is not None}, lora_r={self.lora_r}'
 
 
@@ -130,3 +131,10 @@ class LightLoRAModel(nn.Module):
         parent_name = ".".join(module_names_list[:-1])
         parent = self.base_model.get_submodule(parent_name)
         return parent
+    
+    def prepare_for_finetuning(self):
+        for name, param in self.base_model.named_parameters():
+            if "lora_" in name:
+                param.requires_grad = True
+            else:
+                param.requires_grad = False

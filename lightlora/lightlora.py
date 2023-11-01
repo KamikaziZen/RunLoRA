@@ -59,12 +59,14 @@ class LightLoRACollection(object):
                 if i.startswith("forward") and i[-5:] != "flops"]
         self.backward_keys = [i for i in dir(self) \
                 if i.startswith("backward") and i[-5:] != "flops"]
-        self.benchmarks = {}
         self.forward_keys_short = ["forward{}".format(i) \
                 for i in range(1, 4)]
         self.backward_keys_short = ["backward{}".format(i) \
                 for i in range(1, 6)]
-        self.benchmarks_short = {}
+
+        self.flops_benchmarks = {}
+        self.time_benchmarks = {}
+        self.time_benchmarks_short = {}
 
     def __getitem__(self, index):
         path_f, path_b = index
@@ -89,22 +91,6 @@ class LightLoRACollection(object):
         return LightLoRA
 
     def get_best_by_flops(self, X, W, U, V, b):
-        path_f_flops = [getattr(self, key+"_flops")(X, W, U, V, b) \
-                for key in self.forward_keys_short]
-        path_f_index = 0
-        for i in range(1, len(path_f_flops)):
-            if path_f_flops[path_f_index] > path_f_flops[i]:
-                path_f_index = i
-        path_b_flops = [getattr(self, key+"_flops")(X, W, U, V, b) \
-                for key in self.backward_keys_short]
-        path_b_index = 0
-        for i in range(1, len(path_b_flops)):
-            if path_b_flops[path_b_index] > path_b_flops[i]:
-                path_b_index = i
-        return self.forward_keys_short[path_f_index], \
-               self.backward_keys_short[path_b_index]
-
-    def get_best_by_bench(self, X, W, U, V, b):
         if b is not None:
             key = (X.shape, X.requires_grad, W.shape, W.requires_grad,
                    U.shape, U.requires_grad, V.shape, V.requires_grad,
@@ -112,14 +98,45 @@ class LightLoRACollection(object):
         else:
             key = (X.shape, X.requires_grad, W.shape, W.requires_grad,
                    U.shape, U.requires_grad, V.shape, V.requires_grad)
-        if key not in self.benchmarks:
+
+        if key not in self.flops_benchmarks:
+            path_f_flops = [getattr(self, key+"_flops")(X, W, U, V, b) \
+                    for key in self.forward_keys_short]
+            path_f_index = 0
+            for i in range(1, len(path_f_flops)):
+                if path_f_flops[path_f_index] > path_f_flops[i]:
+                    path_f_index = i
+
+            path_b_flops = [getattr(self, key+"_flops")(X, W, U, V, b) \
+                    for key in self.backward_keys_short]
+            path_b_index = 0
+            for i in range(1, len(path_b_flops)):
+                if path_b_flops[path_b_index] > path_b_flops[i]:
+                    path_b_index = i
+
+            self. flops_benchmarks[key] = (
+                self.forward_keys_short[path_f_index],
+                self.backward_keys_short[path_b_index]
+            )
+
+        return self.flops_benchmarks[key]
+
+    def get_best_by_time(self, X, W, U, V, b):
+        if b is not None:
+            key = (X.shape, X.requires_grad, W.shape, W.requires_grad,
+                   U.shape, U.requires_grad, V.shape, V.requires_grad,
+                   b.shape, b.requires_grad)
+        else:
+            key = (X.shape, X.requires_grad, W.shape, W.requires_grad,
+                   U.shape, U.requires_grad, V.shape, V.requires_grad)
+        if key not in self.time_benchmarks:
             path_f, path_b = timeit_lightlora(self.forward_keys,
                                               self.backward_keys,
                                               X, W, U, V, b)
-            self.benchmarks[key] = (path_f, path_b)
-        return self.benchmarks[key]
+            self.time_benchmarks[key] = (path_f, path_b)
+        return self.time_benchmarks[key]
 
-    def get_best_by_bench_short(self, X, W, U, V, b):
+    def get_best_by_time_short(self, X, W, U, V, b):
         if b is not None:
             key = (X.shape, X.requires_grad, W.shape, W.requires_grad,
                    U.shape, U.requires_grad, V.shape, V.requires_grad,
@@ -127,20 +144,32 @@ class LightLoRACollection(object):
         else:
             key = (X.shape, X.requires_grad, W.shape, W.requires_grad,
                    U.shape, U.requires_grad, V.shape, V.requires_grad)
-        if key not in self.benchmarks_short:
+        if key not in self.time_benchmarks_short:
             path_f, path_b = timeit_lightlora(
                 self.forward_keys_short, self.backward_keys_short,
                 X, W, U, V, b)
-            self.benchmarks_short[key] = (path_f, path_b)
-        return self.benchmarks_short[key]
+            self.time_benchmarks_short[key] = (path_f, path_b)
+        return self.time_benchmarks_short[key]
 
     def get_best(self, criterion, x, W, U, V, b):
         if criterion == "flops":
             path_f, path_b = self.get_best_by_flops(x, W, U, V, b)
-        elif criterion == "benchmark":
-            path_f, path_b = self.get_best_by_bench(x, W, U, V, b)
-        elif criterion == "benchmark_short":
-            path_f, path_b = self.get_best_by_bench_short(x, W, U, V, b)
+        elif criterion == "time":
+            path_f, path_b = self.get_best_by_time(x, W, U, V, b)
+        elif criterion == "time_short":
+            path_f, path_b = self.get_best_by_time_short(x, W, U, V, b)
+
+        return self.__getitem__((path_f, path_b))
+
+    def lookup_best(self, criterion, key):
+        if criterion == 'flops':
+            path_f, path_b = self.flops_benchmarks[key]
+        elif criterion == 'time':
+            path_f, path_b = self.time_benchmarks[key]
+        elif criterion == 'time_short':
+            path_f, path_b = self.time_benchmarks_short[key]
+        else:
+            raise ValueError(f'Invalid criterion: {criterion}')
 
         return self.__getitem__((path_f, path_b))
 
