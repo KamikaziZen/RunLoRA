@@ -22,13 +22,13 @@ class LoRALayer():
             self.lora_dropout = lambda x: x
 
 
-class LightLoRALinear(nn.Linear, LoRALayer):
+class LightLoRALinear(nn.Module, LoRALayer):
     def __init__(
         self,
         in_features: int,
         out_features: int,
-        path_f: int,
-        path_b: int,
+        lora_operator,
+        bias: bool,
         lora_r: int,
         lora_alpha: int,
         lora_dropout: float = 0.,
@@ -36,12 +36,21 @@ class LightLoRALinear(nn.Linear, LoRALayer):
     ):
         assert lora_r > 0, 'LoRA rank must be positive'
 
-        nn.Linear.__init__(self, in_features, out_features, **kwargs)
+        super().__init__()
         LoRALayer.__init__(self, lora_r=lora_r, lora_alpha=lora_alpha,
                            lora_dropout=lora_dropout)
 
-        self.U = nn.Parameter(self.weight.new_zeros((lora_r, in_features)))
-        self.V = nn.Parameter(self.weight.new_zeros((out_features, lora_r)))
+        self.in_features = in_features
+        self.out_features = out_features
+        # transponent to usual torch.Linear weights
+        self.weight = nn.Parameter(torch.empty((in_features, out_features)), **kwargs)
+        if bias:
+            self.bias = nn.Parameter(torch.empty(out_features, **kwargs))
+        else:
+            self.register_parameter('bias', None)
+
+        self.lora_U = nn.Parameter(self.weight.new_zeros((in_features, lora_r)))
+        self.lora_V = nn.Parameter(self.weight.new_zeros((lora_r, out_features)))
         self.scaling = self.lora_alpha / self.lora_r
 
         # Freezing the pre-trained weight matrix
@@ -51,28 +60,36 @@ class LightLoRALinear(nn.Linear, LoRALayer):
         self.reset_parameters()
 
         # Setting forward and backward paths
-        self.light_lora_func = light_lora_collection[path_f, path_b].apply
+        self.light_lora_func = lora_operator.apply
 
     def reset_parameters(self):
-        nn.Linear.reset_parameters(self)
-        if hasattr(self, 'U'):
-            nn.init.kaiming_uniform_(self.U, a=math.sqrt(5))
-            nn.init.zeros_(self.V)
+        nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+        if self.bias is not None:
+            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.weight)
+            bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
+            init.uniform_(self.bias, -bound, bound)
+
+        nn.init.kaiming_uniform_(self.lora_U, a=math.sqrt(5))
+        nn.init.zeros_(self.lora_V)
 
     def train(self, mode: bool = True):
         nn.Linear.train(self, mode)
         # set lora dropout here to train?
 
     def forward(self, x: torch.Tensor):
-        return self.light_lora_func(x, self.weight.t(),
-                                    self.U, self.V, self.bias)
+        # TODO: scaling
+        return self.light_lora_func(x, self.weight,
+                                    self.lora_U, self.lora_V, self.bias)
+
+    def extra_repr(self) -> str:
+        return f'in_features={self.in_features}, out_features={self.out_features},' \
+               f'bias={self.bias is not None}, lora_r={self.lora_r}'
 
 
-class LighLoRAModel(nn.Module):
+class LightLoRAModel(nn.Module):
     def __init__(self,
                  model: PreTrainedModel,
-                 path_f: int,
-                 path_b: int,
+                 lora_operator,
                  target_modules: List[str],
                  lora_r: int,
                  lora_alpha: int,
@@ -97,12 +114,11 @@ class LighLoRAModel(nn.Module):
             new_module = LightLoRALinear(
                 module.in_features,
                 module.out_features,
-                path_f=path_f,
-                path_b=path_b,
+                lora_operator,
+                bias=True if module.bias else False,
                 lora_r=self.lora_r,
                 lora_alpha=self.lora_alpha,
                 lora_dropout=self.lora_dropout,
-                bias=module.bias is not None,
             )
 
             parent = self._get_parent(module_name)
