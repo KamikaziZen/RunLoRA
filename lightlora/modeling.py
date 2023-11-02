@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 from transformers import PreTrainedModel
-from lightlora import light_lora_collection
 from typing import List
 import math
 
@@ -61,14 +60,14 @@ class LightLoRALinear(nn.Module, LoRALayer):
         self.reset_parameters()
 
         # Setting forward and backward paths
-        self.light_lora_func = lora_operator.apply
+        self.lora_operator = lora_operator
 
     def reset_parameters(self):
         nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
         if self.bias is not None:
             fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.weight)
             bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
-            init.uniform_(self.bias, -bound, bound)
+            nn.init.uniform_(self.bias, -bound, bound)
 
         nn.init.kaiming_uniform_(self.lora_U, a=math.sqrt(5))
         nn.init.zeros_(self.lora_V)
@@ -79,18 +78,21 @@ class LightLoRALinear(nn.Module, LoRALayer):
 
     def forward(self, x: torch.Tensor):
         # TODO: scaling
-        return self.light_lora_func(x, self.weight,
-                                    self.lora_U, self.lora_V, self.bias)
+        return self.lora_operator.apply(
+            x, self.weight, self.lora_U, self.lora_V, self.bias)
 
     def extra_repr(self) -> str:
-        return f'in_features={self.in_features}, out_features={self.out_features}, ' \
-               f'bias={self.bias is not None}, lora_r={self.lora_r}'
+        return f'in_features={self.in_features}, ' \
+               f'out_features={self.out_features}, ' \
+               f'bias={self.bias is not None}, lora_r={self.lora_r}, ' \
+               f'forward={self.lora_operator.forward.__name__}, ' \
+               f'backward={self.lora_operator.backward.__name__}'
 
 
 class LightLoRAModel(nn.Module):
     def __init__(self,
                  model: PreTrainedModel,
-                 lora_operator,
+                 light_lora_mapping,
                  target_modules: List[str],
                  lora_r: int,
                  lora_alpha: int,
@@ -115,7 +117,7 @@ class LightLoRAModel(nn.Module):
             new_module = LightLoRALinear(
                 module.in_features,
                 module.out_features,
-                lora_operator,
+                light_lora_mapping[module_name],
                 bias=True if module.bias else False,
                 lora_r=self.lora_r,
                 lora_alpha=self.lora_alpha,
@@ -131,7 +133,7 @@ class LightLoRAModel(nn.Module):
         parent_name = ".".join(module_names_list[:-1])
         parent = self.base_model.get_submodule(parent_name)
         return parent
-    
+
     def prepare_for_finetuning(self):
         for name, param in self.base_model.named_parameters():
             if "lora_" in name:
