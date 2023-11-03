@@ -25,6 +25,7 @@ def parse_args(args):
     parser.add_argument("--criterions",
                         action="extend",
                         nargs="+", type=str)
+    parser.add_argument('--min_run_time', type=float, default=10.)
     parser.add_argument('-o', "--out", type=str, required=False)
 
     args = parser.parse_args(args)
@@ -59,10 +60,12 @@ def bench_model(model, config, args):
         globals={'input_ids': input_ids, 'labels': labels, 'model': model})
 
     # warmup
-    _ = bench.blocked_autorange(min_run_time=10.0)
+    warmup_mesure = bench.blocked_autorange(min_run_time=10.0)
+    assert len(warmup_mesure.times) >= 1, \
+        'Number of measurements for warmup is less than 1, increase min_run_time!'
 
     # benchmarking
-    measure = bench.blocked_autorange(min_run_time=10.0)
+    measure = bench.blocked_autorange(min_run_time=args.min_run_time)
     print("Computing mean with {} measurments, {} runs per measurment".format(
         len(measure.times), measure.number_per_run))
     assert len(measure.times) >= 10, \
