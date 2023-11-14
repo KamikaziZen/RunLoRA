@@ -84,7 +84,9 @@ class LightLoRALinear(nn.Module, LoRALayer):
     def extra_repr(self) -> str:
         return f'in_features={self.in_features}, ' \
                f'out_features={self.out_features}, ' \
-               f'bias={self.bias is not None}, lora_r={self.lora_r}, ' \
+               f'bias={self.bias is not None}, ' \
+               f'lora_r={self.lora_r}, ' \
+               f'lora_alpha={self.lora_alpha}, ' \
                f'forward={self.lora_operator.forward.__name__}, ' \
                f'backward={self.lora_operator.backward.__name__}'
 

@@ -15,6 +15,7 @@ def timeit_lightlora(paths_f, paths_b, X, W, U, V, B):
         b = torch.zeros_like(B, requires_grad=B.requires_grad)
     else:
         b = None
+
     # Benchmark forward
     statement = "light_lora.apply(x, w, u, v, b)"
     path_b = paths_b[0]
@@ -24,16 +25,18 @@ def timeit_lightlora(paths_f, paths_b, X, W, U, V, B):
         x.grad, w.grad, u.grad, v.grad = [None] * 4
         if b is not None:
             b.grad = None
-        print("benchmarking forward {}".format(path_f))
         light_lora = light_lora_collection[path_f, path_b]
         globals_ = {'light_lora': light_lora, 'x': x,
                     'w': w, 'u': u, 'v': v, 'b': b}
         bench = benchmark.Timer(stmt=statement, globals=globals_)
         _ = bench.blocked_autorange(min_run_time=1)
         measure = bench.blocked_autorange(min_run_time=5)
+        print(f"Mean time in us for {path_f}: {measure.mean}")
         if best_path_time > measure.mean:
             best_path_time = measure.mean
             best_path_f = path_f
+    print()
+
     # Benchmark backward
     statement = "loss.backward(retain_graph=True)"
     path_f = best_path_f
@@ -42,16 +45,18 @@ def timeit_lightlora(paths_f, paths_b, X, W, U, V, B):
         x.grad, w.grad, u.grad, v.grad = [None] * 4
         if b is not None:
             b.grad = None
-        print("benchmarking backward {}".format(path_b))
         light_lora = light_lora_collection[path_f, path_b]
         loss = light_lora.apply(x, w, u, v, b).sum().requires_grad_(True)
         globals_ = {'loss': loss}
         bench = benchmark.Timer(stmt=statement, globals=globals_)
         _ = bench.blocked_autorange(min_run_time=1)
         measure = bench.blocked_autorange(min_run_time=5)
+        print(f"Mean time in us for {path_b}: {measure.mean}")
         if best_path_time > measure.mean:
             best_path_time = measure.mean
             best_path_b = path_b
+    print()
+
     return best_path_f, best_path_b
 
 
@@ -62,7 +67,7 @@ class LightLoRACollection(object):
         self.backward_keys = [i for i in dir(self) \
                 if i.startswith("backward") and i[-5:] != "flops"]
         self.forward_keys_short = ["forward{}".format(i) \
-                for i in range(1, 4)]
+                for i in range(1, 5)]
         self.backward_keys_short = ["backward{}".format(i) \
                 for i in range(1, 6)]
 
@@ -94,7 +99,7 @@ class LightLoRACollection(object):
 
     def optimize_for_model(self, model, n_batch, lora_r, target_modules, criterions):
 
-        light_lora_mapping = {}
+        light_lora_mapping = defaultdict(dict)
 
         for module_name, module in model.named_modules():
             if not isinstance(module, nn.Linear):
@@ -119,7 +124,7 @@ class LightLoRACollection(object):
                     v = torch.randn(lora_r, module.out_features, requires_grad=True)
                     _ = self.get_best(criterion, x, w, u, v)
 
-                light_lora_mapping[module_name] = \
+                light_lora_mapping[criterion][module_name] = \
                     self.lookup_best(criterion, key)
 
         return light_lora_mapping
@@ -137,16 +142,20 @@ class LightLoRACollection(object):
             path_f_flops = [getattr(self, key+"_flops")(X, W, U, V, b) \
                     for key in self.forward_keys_short]
             path_f_index = 0
-            for i in range(1, len(path_f_flops)):
+            for i in range(len(path_f_flops)):
+                print(f'Flops for {self.forward_keys_short[i]}: {path_f_flops[i]}')
                 if path_f_flops[path_f_index] > path_f_flops[i]:
                     path_f_index = i
+            print()
 
             path_b_flops = [getattr(self, key+"_flops")(X, W, U, V, b) \
                     for key in self.backward_keys_short]
             path_b_index = 0
-            for i in range(1, len(path_b_flops)):
+            for i in range(len(path_b_flops)):
+                print(f'Flops for {self.backward_keys_short[i]}: {path_b_flops[i]}')
                 if path_b_flops[path_b_index] > path_b_flops[i]:
                     path_b_index = i
+            print()
 
             self. flops_benchmarks[key] = (
                 self.forward_keys_short[path_f_index],
@@ -344,10 +353,29 @@ class LightLoRACollection(object):
         return nflops
 
     @staticmethod
+    @custom_fwd
+    def forward4(ctx, input, W, U, V, b):
+        """Y=b+X(W+UV) save(X,W,U,V)"""
+        __class__.save_context(ctx, input, W, U, V, b)
+        if b is not None:
+            return b + input @ W.addmm(U, V)
+        else:
+            return input @ (W.addmm(U, V))
+
+    @staticmethod
+    def forward4_flops(input, W, U, V, b):
+        nflops = 0
+        # W .addmm (U, V)
+        nflops += 2 * U.shape[0] * U.shape[1] * V.shape[1]
+        # input .mm (W.addmm(U, V))
+        nflops += 2 * prod(input.shape) * W.shape[1]
+        return nflops
+
+    @staticmethod
     @custom_bwd
     def backward1(ctx, grad_output):
-        """load(X,W,U,V) Z1=dYV' Z2=XU
-        dU=X'Z1 dV=Z2'dY dX=dYW'+Z1U' db=dY.sum(axis=0)"""
+        """load(X,W,U,V) Z=dYV'
+        dU=X'Z dV=(XU)'dY dX=dYW'+ZU' db=dY.sum(axis=0)"""
         input, W, U, V, b = __class__.load_context(ctx)
         if input is not None:
             X = input.reshape(-1, input.shape[-1])
@@ -576,31 +604,27 @@ class LightLoRACollection(object):
                 input.requires_grad, W.requires_grad, U.requires_grad, \
                 V.requires_grad, b.requires_grad if b is not None else None
         nflops = 0
-        # Z1 = dY .mm (V.t())
         if X_req_grad or U_req_grad:
+            # Z = dY .mm (V.t())
             nflops += 2 * prod(input.shape[:-1]) * V.shape[1] * V.shape[0]
-        # Z2 = X .mm (U)
-        if V_req_grad:
-            nflops += 2 * prod(input.shape) * U.shape[1]
-        # grad_U = X.t() .mm (Z1)
         if U_req_grad:
+            # grad_U = X.t().mm(Z)
             nflops += 2 * prod(input.shape) * V.shape[0]
-        # grad_input = Z1.t() .mm (U.t())
-        if X_req_grad:
-            nflops += 2 * prod(input.shape) * V.shape[0]
-        # grad_V = Z2.t() .mm (dY)
         if V_req_grad:
-            nflops += 2 * U.shape[1] * prod(input.shape[:-1]) * W.shape[1]
-        # grad_input += dY .mm (W.t())
+            # grad_V = (XU).t().mm(dY)
+            nflops += 2 * prod(input.shape) * U.shape[1]
+            nflops += 2 * prod(input.shape[:-1]) * prod(V.shape)
         if X_req_grad:
+            # grad_input = Z.mm(U.t()).addmm(dY, W.t())
+            nflops += 2 * prod(input.shape) * V.shape[0]
             nflops += 2 * prod(input.shape) * W.shape[1]
         return nflops
 
     @staticmethod
     @custom_bwd
     def backward2(ctx, grad_output):
-        """load(X,W,U,V) Z1=dYV' Z2=X'dY
-        dU=X'Z1 dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
+        """load(X,W,U,V) Z=dYV'
+        dU=X'Z dV=U'X'dY dX=dYW'.addmm(Z,U') db=dY.sum(axis=0)"""
         input, W, U, V, b = __class__.load_context(ctx)
         X = input.reshape(-1, input.shape[-1])
         dY = grad_output.reshape(-1, grad_output.shape[-1])
@@ -1098,24 +1122,20 @@ class LightLoRACollection(object):
                 input.requires_grad, W.requires_grad, U.requires_grad, \
                 V.requires_grad, b.requires_grad if b is not None else None
         nflops = 0
-        # Z1 = dY .mm (V.t())
         if X_req_grad or U_req_grad:
+            # Z = dY .mm (V.t())
             nflops += 2 * prod(input.shape[:-1]) * V.shape[1] * V.shape[0]
-        # Z2 = X.t() .mm (dY)
-        if V_req_grad:
-            nflops += 2 * prod(input.shape) * W.shape[1]
-        # grad_U = X.t().mm (Z1)
         if U_req_grad:
+            # grad_U = X.t().mm (Z)
             nflops += 2 * prod(input.shape) * V.shape[0]
-        # grad_input = dY .mm (W.t())
-        if X_req_grad:
-            nflops += 2 * prod(input.shape) * W.shape[1]
-        # grad_input += Z1 .mm (U.t())
-        if X_req_grad:
-            nflops += 2 * prod(input.shape[:-1]) * V.shape[0] * U.shape[0]
-        # grad_V = U.t() .mm (Z2)
         if V_req_grad:
+            # grad_V = U.t() .mm (X.t()).mm(dY)
+            nflops += 2 * prod(input.shape) * W.shape[1]
             nflops += 2 * U.shape[0] * U.shape[1] * W.shape[1]
+        if X_req_grad:
+            # grad_input += dY .mm (W.t()).addmm(Z, U.t())
+            nflops += 2 * prod(input.shape) * W.shape[1]
+            nflops += 2 * prod(input.shape) * V.shape[0]
         return nflops
 
     @staticmethod

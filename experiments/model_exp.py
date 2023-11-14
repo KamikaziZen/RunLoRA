@@ -34,7 +34,9 @@ def parse_args(args):
     assert args.lora_r > 0, "LoRA rank must be positive"
     assert len(args.target_modules) > 0, 'target_modules is empty'
     if not args.out:
-        args.out = args.model_name_or_config.split('/')[-1].split('.')[0]
+        args.out = \
+            args.model_name_or_config.split('/')[-1].split('.')[0] + \
+            f'b{args.n_batch}_r{args.lora_r}'
 
     return args
 
@@ -107,7 +109,7 @@ def main(args):
             target_modules=args.target_modules,
             criterions=args.criterions)
 
-    del model
+    del model, light_lora_collection
     reset_memory()
 
     # LightLoRA
@@ -121,7 +123,8 @@ def main(args):
         print(f'Total params before LightLoRA transform: {params}, '
               f'Trainable params before LightLoRA transform: {trainable_params}')
 
-        model = LightLoRAModel(model, light_lora_mapping,
+        model = LightLoRAModel(model,
+                               light_lora_mapping[criterion],
                                lora_r=args.lora_r,
                                lora_alpha=args.lora_alpha,
                                target_modules=args.target_modules)
@@ -144,7 +147,7 @@ def main(args):
         del model
         reset_memory()
 
-    del light_lora_collection, light_lora_mapping
+    del light_lora_mapping
     reset_memory()
 
     # Vanilla LoRA
@@ -178,22 +181,20 @@ def main(args):
         "Number of trainable params after LoRA and LightLoRA transforms do not match!"
 
     stats = bench_model(model, config, args)
-    rows.append({'path_f': 'LoRA',
-                 'path_b': 'LoRA',
-                 **vars(args), **stats})
+    rows.append({**vars(args), **stats})
 
     del model
     reset_memory()
 
     # Results
-    df = pd.DataFrame.from_records(rows).drop(columns="out")
+    df = pd.DataFrame.from_records(rows).drop(columns=['out', 'criterions'])
     df.sort_values(['mean_time_us', 'max_mem_overhead_MB'],
                    ascending=[True, True], inplace=True)
     df.to_csv(args.out+'.csv')
     print(args)
     print(df[['model_name_or_config',
-              'criterion', 'path_f', 'path_b',
-              'mean_time_us', 'max_mem_overhead_MB', 'msrs/runs']])
+              'criterion', 'mean_time_us',
+              'max_mem_overhead_MB', 'msrs/runs']])
 
 
 if __name__ == "__main__":
