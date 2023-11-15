@@ -320,7 +320,8 @@ class LightLoRACollection(object):
         # input .mm (W.addmm(U, V))
         nflops += 2 * prod(input.shape) * W.shape[1]
         return nflops
-
+    
+    @staticmethod
     def backward1(ctx, grad_output):
         """load(X,W,U,V) Z=dYV'
         dU=X'Z dV=(XU)'dY dX=dYW'+ZU' db=dY.sum(axis=0)"""
