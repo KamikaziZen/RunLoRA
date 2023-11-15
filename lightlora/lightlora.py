@@ -1,5 +1,4 @@
 import torch
-from torch.cuda.amp import custom_fwd, custom_bwd
 from torch.utils import benchmark
 import torch.nn as nn
 from math import prod
@@ -307,7 +306,7 @@ class LightLoRACollection(object):
     @staticmethod
     def forward4(ctx, input, W, U, V, b):
         """Y=b+X(W+UV) save(X,W,U,V)"""
-        __class__.save_context(ctx, input, W, U, V, b)
+        __class__.save_context(ctx, input, W, U, V)
         if b is not None:
             return b + input @ W.addmm(U, V)
         else:
@@ -1072,7 +1071,7 @@ class LightLoRACollection(object):
         X = input.contiguous().view(-1, input.shape[-1])
         dY = grad_output.contiguous().view(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
-                ctx.needs_input_grad
+            ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
         if U_req_grad or V_req_grad:
             Z = X.t().mm(dY)

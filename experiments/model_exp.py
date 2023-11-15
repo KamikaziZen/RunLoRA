@@ -50,7 +50,7 @@ def reset_memory():
 def bench_model(model, config, args):
     # generating random tokens as input batch
     # TODO: put batch generation in setup?
-    input_ids = torch.randint(low=0, high=config.vocab_size, 
+    input_ids = torch.randint(low=0, high=config.vocab_size,
                               size=(args.n_batch, config.max_sequence_length))
     labels = input_ids.clone()
 
