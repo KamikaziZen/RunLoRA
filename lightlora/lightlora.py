@@ -5,7 +5,7 @@ from math import prod
 from collections import defaultdict
 
 
-def timeit_lightlora(paths_f, paths_b, X, W, U, V, B):
+def timeit_lightlora(paths_f, paths_b, X, W, U, V, B, min_run_time=5.):
     x = torch.zeros_like(X, requires_grad=X.requires_grad)
     w = torch.zeros_like(W, requires_grad=W.requires_grad)
     u = torch.zeros_like(U, requires_grad=U.requires_grad)
@@ -28,8 +28,8 @@ def timeit_lightlora(paths_f, paths_b, X, W, U, V, B):
         globals_ = {'light_lora': light_lora, 'x': x,
                     'w': w, 'u': u, 'v': v, 'b': b}
         bench = benchmark.Timer(stmt=statement, globals=globals_)
-        _ = bench.blocked_autorange(min_run_time=1)
-        measure = bench.blocked_autorange(min_run_time=5)
+        _ = bench.blocked_autorange(min_run_time=min_run_time)
+        measure = bench.blocked_autorange(min_run_time=min_run_time)
         print(f"Mean time in us for {path_f}: {measure.mean}")
         if best_path_time > measure.mean:
             best_path_time = measure.mean
@@ -60,7 +60,7 @@ def timeit_lightlora(paths_f, paths_b, X, W, U, V, B):
 
 
 class LightLoRACollection(object):
-    def __init__(self):
+    def __init__(self, min_run_time=5.):
         self.forward_keys = [i for i in dir(self) \
                 if i.startswith("forward") and i[-5:] != "flops"]
         self.backward_keys = [i for i in dir(self) \
@@ -73,6 +73,8 @@ class LightLoRACollection(object):
         self.flops_benchmarks = {}
         self.time_benchmarks = {}
         self.time_benchmarks_short = {}
+
+        self.min_run_time = min_run_time
 
     def __getitem__(self, index):
         path_f, path_b = index
@@ -174,7 +176,8 @@ class LightLoRACollection(object):
         if key not in self.time_benchmarks:
             path_f, path_b = timeit_lightlora(self.forward_keys,
                                               self.backward_keys,
-                                              X, W, U, V, b)
+                                              X, W, U, V, b,
+                                              min_run_time=self.min_run_time)
             self.time_benchmarks[key] = (path_f, path_b)
         return self.time_benchmarks[key]
 
@@ -187,9 +190,10 @@ class LightLoRACollection(object):
             key = (X.shape, X.requires_grad, W.shape, W.requires_grad,
                    U.shape, U.requires_grad, V.shape, V.requires_grad)
         if key not in self.time_benchmarks_short:
-            path_f, path_b = timeit_lightlora(
-                self.forward_keys_short, self.backward_keys_short,
-                X, W, U, V, b)
+            path_f, path_b = timeit_lightlora(self.forward_keys_short, 
+                                              self.backward_keys_short,
+                                              X, W, U, V, b,
+                                              min_run_time=self.min_run_time)
             self.time_benchmarks_short[key] = (path_f, path_b)
         return self.time_benchmarks_short[key]
 
@@ -320,7 +324,7 @@ class LightLoRACollection(object):
         # input .mm (W.addmm(U, V))
         nflops += 2 * prod(input.shape) * W.shape[1]
         return nflops
-    
+
     @staticmethod
     def backward1(ctx, grad_output):
         """load(X,W,U,V) Z=dYV'

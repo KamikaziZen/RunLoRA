@@ -7,6 +7,7 @@ from peft import LoraConfig, get_peft_model
 from argparse import ArgumentParser
 import gc
 import pandas as pd
+import os
 
 
 def parse_args(args):
@@ -36,35 +37,58 @@ def parse_args(args):
     if not args.out:
         args.out = \
             args.model_name_or_config.split('/')[-1].split('.')[0] + \
-            f'b{args.n_batch}_r{args.lora_r}'
+            f'b{args.n_batch}r{args.lora_r}'
 
     return args
 
 
-def reset_memory():
+def reset_memory(reset_stats=True):
     gc.collect()
     torch.cuda.empty_cache()
-    torch.cuda.reset_peak_memory_stats()
+    if reset_stats:
+        torch.cuda.reset_peak_memory_stats()
 
 
-def bench_model(model, config, args):
+def get_model(args):
+    if os.path.exists(args.model_name_or_config):
+        config = AutoConfig.from_pretrained(args.model_name_or_config)
+        model = AutoModelForCausalLM.from_config(config)
+    else:
+        model = AutoModelForCausalLM.from_pretrained(
+            args.model_name_or_config,
+            load_in_8bit=True,
+            torch_dtype=torch.float,
+            # takes more time but requires less memory
+            use_cache=False,
+        )
+        # model.model.layers = model.model.layers[:10]
+
+    return model
+
+
+def bench_model(model, args):
     # generating random tokens as input batch
     # TODO: put batch generation in setup?
+    config = model.config
     input_ids = torch.randint(low=0, high=config.vocab_size,
                               size=(args.n_batch, config.max_sequence_length))
     labels = input_ids.clone()
 
     reset_memory()
-    max_mem_prev = torch.cuda.max_memory_allocated()
 
     bench = benchmark.Timer(
         stmt='model(input_ids, labels=labels).loss.backward()',
+        # setup='reset_memory(reset_stats=False)',
         globals={'input_ids': input_ids, 'labels': labels, 'model': model})
 
     # warmup
-    warmup_mesure = bench.blocked_autorange(min_run_time=10.0)
+    warmup_mesure = bench.blocked_autorange(min_run_time=args.min_run_time)
     assert len(warmup_mesure.times) >= 1, \
         'Number of measurements for warmup is less than 1, increase min_run_time!'
+    
+    reset_memory()
+    max_mem_prev = torch.cuda.max_memory_allocated()
+    max_res_prev = torch.cuda.max_memory_reserved()
 
     # benchmarking
     measure = bench.blocked_autorange(min_run_time=args.min_run_time)
@@ -74,12 +98,14 @@ def bench_model(model, config, args):
         'Number of measurements is less than 10, increase min_run_time!'
 
     max_mem = torch.cuda.max_memory_allocated()
+    max_res = torch.cuda.max_memory_reserved()
 
     del input_ids, labels, bench
     reset_memory()
 
     print("Mean time: {} us".format(measure.mean * 1000000))
-    print("Max mem overhead: {} MB".format((max_mem - max_mem_prev) / 2**20))
+    print("Max Allocated Overhead: {} MB".format((max_mem - max_mem_prev) / 2**20))
+    print("Max Reserved Overhead:{} MB".format((max_res - max_res_prev) / 2**20))
     print()
 
     return {'mean_time_us': measure.mean * 1000000,
@@ -96,11 +122,10 @@ def main(args):
     dtype = torch.float
     torch.set_default_dtype(dtype)
 
-    config = AutoConfig.from_pretrained(args.model_name_or_config)
-    model = AutoModelForCausalLM.from_config(config)
+    model = get_model(args)
 
     # looking for the best lora operator for given shapes
-    light_lora_collection = LightLoRACollection()
+    light_lora_collection = LightLoRACollection(min_run_time=args.min_run_time/2)
     light_lora_mapping = \
         light_lora_collection.optimize_for_model(
             model,
@@ -111,12 +136,13 @@ def main(args):
 
     del model, light_lora_collection
     reset_memory()
+    print('Allocated:', torch.cuda.memory_allocated() / 2**20, 'MB')
 
     # LightLoRA
     for criterion in args.criterions:
 
         # manage putting model to cuda only after replacing modules?
-        model = AutoModelForCausalLM.from_config(config)
+        model = get_model(args)
         params = sum(p.numel() for p in model.parameters())
         trainable_params = \
             sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -128,6 +154,11 @@ def main(args):
                                lora_r=args.lora_r,
                                lora_alpha=args.lora_alpha,
                                target_modules=args.target_modules)
+        # memory is not immediately cleaned after lightlora transform
+        reset_memory()
+        print(model)
+        print('Allocated for Model:', torch.cuda.memory_allocated() / 2**20, 'MB')
+
         # Every parameter except for lora adapters is set to requires_grad=False
         model.prepare_for_finetuning()
         params = sum(p.numel() for p in model.parameters())
@@ -135,12 +166,11 @@ def main(args):
             sum(p.numel() for p in model.parameters() if p.requires_grad)
         print(f'Total params after LightLoRA transform: {params}, '
               f'Trainable params after LightLoRA transform: {trainable_params_lightlora}')
-        print(model)
 
         assert trainable_params_lightlora < trainable_params, \
             "Number of trainable params after LightLoRA transform increased!"
 
-        stats = bench_model(model, config, args)
+        stats = bench_model(model, args)
         rows.append({'criterion': criterion,
                      **vars(args), **stats})
 
@@ -149,9 +179,10 @@ def main(args):
 
     del light_lora_mapping
     reset_memory()
+    print('Allocated:', torch.cuda.memory_allocated() / 2**20, 'MB')
 
     # Vanilla LoRA
-    model = AutoModelForCausalLM.from_config(config)
+    model = get_model(args)
     params = sum(p.numel() for p in model.parameters())
     trainable_params = \
         sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -167,7 +198,11 @@ def main(args):
         task_type="CAUSAL_LM",
     )
     model = get_peft_model(model, lora_config)
+    # memory is not immediately cleaned after peft transform
+    reset_memory()
     print(model)
+    print('Allocated for model:', torch.cuda.max_memory_allocated() / 2**20, 'MB')
+
     params = sum(p.numel() for p in model.parameters())
     trainable_params_lora = \
         sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -180,10 +215,11 @@ def main(args):
     assert trainable_params_lora == trainable_params_lightlora, \
         "Number of trainable params after LoRA and LightLoRA transforms do not match!"
 
-    stats = bench_model(model, config, args)
+    stats = bench_model(model, args)
     rows.append({**vars(args), **stats})
 
     del model
+    print('Max Reserved:', torch.cuda.max_memory_reserved() / 2**20, 'MB')
     reset_memory()
 
     # Results

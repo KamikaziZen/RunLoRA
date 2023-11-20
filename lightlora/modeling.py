@@ -28,11 +28,12 @@ class LightLoRALinear(nn.Module, LoRALayer):
         in_features: int,
         out_features: int,
         lora_operator,
-        bias: bool,
         lora_r: int,
         lora_alpha: int,
         lora_dropout: float = 0.,
-        **kwargs
+        weight=None,
+        bias=None,
+        keep_original=False
     ):
         assert lora_r > 0, 'LoRA rank must be positive'
 
@@ -42,19 +43,24 @@ class LightLoRALinear(nn.Module, LoRALayer):
 
         self.in_features = in_features
         self.out_features = out_features
+        self.keep_original = keep_original
+
         # transponent to usual torch.Linear weights
-        self.weight = nn.Parameter(torch.empty((in_features, out_features)), **kwargs)
-        if bias:
-            self.bias = nn.Parameter(torch.empty(out_features, **kwargs))
+        self.weight = nn.Parameter(torch.empty((in_features, out_features)),
+                                   # Freezing the pre-trained weight matrix
+                                   requires_grad=False)
+        if weight is not None:
+            self.weight.data = weight.data.detach().t()
+        if bias is not None:
+            self.bias = nn.Parameter(torch.empty(out_features),
+                                     requires_grad=False)
+            self.bias.data = bias.data.detach()
         else:
             self.register_parameter('bias', None)
 
-        self.lora_U = nn.Parameter(self.weight.new_zeros((in_features, lora_r)))
-        self.lora_V = nn.Parameter(self.weight.new_zeros((lora_r, out_features)))
+        self.lora_U = nn.Parameter(torch.empty((in_features, lora_r)))
+        self.lora_V = nn.Parameter(torch.empty((lora_r, out_features)))
         self.scaling = self.lora_alpha / self.lora_r
-
-        # Freezing the pre-trained weight matrix
-        self.weight.requires_grad = False
 
         # Initializing weights
         self.reset_parameters()
@@ -63,11 +69,13 @@ class LightLoRALinear(nn.Module, LoRALayer):
         self.lora_operator = lora_operator
 
     def reset_parameters(self):
-        nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
-        if self.bias is not None:
-            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.weight)
-            bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
-            nn.init.uniform_(self.bias, -bound, bound)
+        if not self.keep_original:
+            nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+            # TODO: get rid of fan_in, fan_out?
+            if self.bias is not None:
+                fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.weight)
+                bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
+                nn.init.uniform_(self.bias, -bound, bound)
 
         nn.init.kaiming_uniform_(self.lora_U, a=math.sqrt(5))
         nn.init.zeros_(self.lora_V)
@@ -90,6 +98,18 @@ class LightLoRALinear(nn.Module, LoRALayer):
                f'forward={self.lora_operator.forward.__name__}, ' \
                f'backward={self.lora_operator.backward.__name__}'
 
+    @classmethod
+    def from_linear(cls, module, lora_operator, **kwargs):
+        self = cls(module.in_features,
+                   module.out_features,
+                   lora_operator,
+                   weight=module.weight,
+                   bias=module.bias,
+                   keep_original=True,
+                   **kwargs)
+
+        return self
+
 
 class LightLoRAModel(nn.Module):
     def __init__(self,
@@ -103,6 +123,7 @@ class LightLoRAModel(nn.Module):
         super().__init__()
 
         self.base_model = model
+        self.config = self.base_model.config
         self.lora_r = lora_r
         self.lora_alpha = lora_alpha
         self.lora_dropout = lora_dropout
@@ -120,11 +141,20 @@ class LightLoRAModel(nn.Module):
                 module.in_features,
                 module.out_features,
                 light_lora_mapping[module_name],
-                bias=True if module.bias else False,
+                weight=None,
+                bias=module.bias,
                 lora_r=self.lora_r,
                 lora_alpha=self.lora_alpha,
                 lora_dropout=self.lora_dropout,
             )
+
+            # new_module = LightLoRALinear.from_linear(
+            #     module,
+            #     light_lora_mapping[module_name],
+            #     lora_r=self.lora_r,
+            #     lora_alpha=self.lora_alpha,
+            #     lora_dropout=self.lora_dropout,
+            # )
 
             parent = self._get_parent(module_name)
             module_suffix = module_name.split(".")[-1]
