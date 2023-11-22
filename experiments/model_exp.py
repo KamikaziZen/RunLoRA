@@ -20,6 +20,7 @@ def parse_args(args):
     parser.add_argument('-r', '--lora_r', type=int, default=8)
     parser.add_argument('-a', '--lora_alpha', type=int, default=8)
     parser.add_argument('-d', '--lora_dropout', type=float, default=0.)
+    parser.add_argument('--dtype', type=str, default='fp32')
     parser.add_argument("--target_modules",
                         action="extend",
                         nargs="+", type=str)
@@ -32,6 +33,17 @@ def parse_args(args):
     args = parser.parse_args(args)
 
     print(args)
+    if args.dtype in ['fp32', 'float32']:
+        args.dtype = torch.float
+    elif args.dtype in ['fp16', 'float16']:
+        args.dtype = torch.half
+    elif args.dtype in ['bf16', 'bfloat16']:
+        if not torch.cuda.is_bf16_supported():
+            raise ValueError('BFloat16 is not supported in your machine.')
+        else:
+            args.dtype = torch.bfloat16
+    else:
+        raise ValueError(f'{args.dtype} is not a supported dtype.')
     assert args.lora_r > 0, "LoRA rank must be positive"
     assert len(args.target_modules) > 0, 'target_modules is empty'
     if not args.out:
@@ -82,9 +94,9 @@ def bench_model(model, args):
         globals={'input_ids': input_ids, 'labels': labels, 'model': model})
 
     # warmup
-    warmup_mesure = bench.blocked_autorange(min_run_time=args.min_run_time)
-    assert len(warmup_mesure.times) >= 1, \
-        'Number of measurements for warmup is less than 1, increase min_run_time!'
+    warmup_measure = bench.blocked_autorange(min_run_time=args.min_run_time)
+    assert len(warmup_measure.times) >= 10, \
+        'Number of measurements is less than 10, increase min_run_time!'
     
     reset_memory()
     max_mem_prev = torch.cuda.max_memory_allocated()
@@ -94,8 +106,6 @@ def bench_model(model, args):
     measure = bench.blocked_autorange(min_run_time=args.min_run_time)
     print("Computing mean with {} measurments, {} runs per measurment".format(
         len(measure.times), measure.number_per_run))
-    assert len(measure.times) >= 10, \
-        'Number of measurements is less than 10, increase min_run_time!'
 
     max_mem = torch.cuda.max_memory_allocated()
     max_res = torch.cuda.max_memory_reserved()
@@ -154,6 +164,7 @@ def main(args):
                                lora_r=args.lora_r,
                                lora_alpha=args.lora_alpha,
                                target_modules=args.target_modules)
+        model = model.to(args.dtype)
         # memory is not immediately cleaned after lightlora transform
         reset_memory()
         print(model)
@@ -198,6 +209,7 @@ def main(args):
         task_type="CAUSAL_LM",
     )
     model = get_peft_model(model, lora_config)
+    model = model.to(args.dtype)
     # memory is not immediately cleaned after peft transform
     reset_memory()
     print(model)
