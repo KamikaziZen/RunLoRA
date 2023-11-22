@@ -4,6 +4,7 @@ from lightlora import LightLoRACollection
 import torch
 import torch.utils.benchmark as benchmark
 from peft import LoraConfig, get_peft_model
+from modeling_llama import LlamaForCausalLM
 from argparse import ArgumentParser
 import gc
 import pandas as pd
@@ -64,7 +65,9 @@ def reset_memory(reset_stats=True):
 def get_model(args):
     if os.path.exists(args.model_name_or_config):
         config = AutoConfig.from_pretrained(args.model_name_or_config)
-        model = AutoModelForCausalLM.from_config(config)
+        # model = AutoModelForCausalLM.from_config(config)
+        # Llama with FlashAttention
+        model = LlamaForCausalLM(config)
     else:
         model = AutoModelForCausalLM.from_pretrained(
             args.model_name_or_config,
@@ -184,6 +187,10 @@ def main(args):
         stats = bench_model(model, args)
         rows.append({'criterion': criterion,
                      **vars(args), **stats})
+
+        # Logging model structure 
+        with open(f'{args.out}_{criterion}', 'w') as f:
+            f.write(model.__repr__())
 
         del model
         reset_memory()
