@@ -110,7 +110,7 @@ class LightLoRACollection(object):
                 continue
 
             key = (
-                torch.Size([n_batch, model.config.max_sequence_length, module.in_features]), False,
+                torch.Size([n_batch, model.config.max_sequence_length, module.in_features]), True,
                 torch.Size([module.in_features, module.out_features]), False,
                 torch.Size([module.in_features, lora_r]), True,
                 torch.Size([lora_r, module.out_features]), True,
@@ -120,7 +120,7 @@ class LightLoRACollection(object):
                 if not self.lookup_best(criterion, key):
                     print(f'Did not find criterion {criterion} for {module_name}. Calculating')
                     w = nn.Parameter(torch.randn(module.in_features, module.out_features), requires_grad=False)
-                    x = torch.randn(n_batch, model.config.max_sequence_length, module.in_features, requires_grad=False)
+                    x = torch.randn(n_batch, model.config.max_sequence_length, module.in_features, requires_grad=True)
                     u = torch.randn(module.in_features, lora_r, requires_grad=True)
                     v = torch.randn(lora_r, module.out_features, requires_grad=True)
                     _ = self.get_best(criterion, x, w, u, v)
