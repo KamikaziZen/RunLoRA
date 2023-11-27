@@ -68,7 +68,7 @@ class LightLoRACollection(object):
         self.forward_keys_short = ["forward{}".format(i) \
                 for i in range(1, 5)]
         self.backward_keys_short = ["backward{}".format(i) \
-                for i in range(1, 6)]
+                for i in range(1, 9)]
 
         self.flops_benchmarks = {}
         self.time_benchmarks = {}
@@ -1679,6 +1679,121 @@ class LightLoRACollection(object):
         if X_req_grad:
             nflops += 2 * prod(input.shape) * W.shape[1]
         return nflops
+    
+    @staticmethod
+    def backward6(ctx, grad_output):
+        """load(X,W,U,V) Z1=X'dY Z2=U'X' Z3=dYV'
+        dU=Z1V' dV=Z2dY dX=dYW'+Z3U' db=dY.sum(axis=0)"""
+        input, W, U, V = ctx.saved_tensors
+        X = input.contiguous().view(-1, input.shape[-1])
+        dY = grad_output.contiguous().view(-1, grad_output.shape[-1])
+        X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
+            ctx.needs_input_grad
+        grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
+        if U_req_grad:
+            grad_U = (X.t().mm(dY)).mm(V.t())
+        if V_req_grad:
+            grad_V = (U.t().mm(X.t())).mm(dY)
+        if X_req_grad:
+            grad_input = (dY.mm(W.t()) + (dY.mm(V.t())).mm(U.t())).view(input.shape)
+        if b_req_grad:
+            grad_b = dY.sum(axis=0)
+        return grad_input, grad_W, grad_U, grad_V, grad_b
+    
+    @staticmethod
+    def backward6_flops(input, W, U, V, b):
+        X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
+                input.requires_grad, W.requires_grad, U.requires_grad, \
+                V.requires_grad, b.requires_grad if b is not None else None
+        nflops = 0
+        if U_req_grad:
+            nflops += prod(input.shape) * V.shape[1]
+            nflops += U.shape[0] * prod(V.shape)
+        if V_req_grad:
+            nflops += U.shape[1] * prod(input.shape)
+            nflops += prod(input.shape[:-1]) * prod(V.shape)
+        if X_req_grad: 
+            nflops += prod(input.shape[:-1]) * prod(V.shape)
+            nflops += prod(input.shape[:-1]) * prod(W.shape)
+            nflops += prod(input.shape[:-1]) * prod(U.shape)
+
+        return 2 * nflops
+    
+    @staticmethod
+    def backward7(ctx, grad_output):
+        """load(X,W,U,V) Z1=X'dY Z2=U'X' Z3=W'+V'U'
+        dU=Z1V' dV=Z2dY dX=dYZ3 db=dY.sum(axis=0)"""
+        input, W, U, V = ctx.saved_tensors
+        X = input.contiguous().view(-1, input.shape[-1])
+        dY = grad_output.contiguous().view(-1, grad_output.shape[-1])
+        X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
+            ctx.needs_input_grad
+        grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
+        if U_req_grad:
+            grad_U = (X.t().mm(dY)).mm(V.t())
+        if V_req_grad:
+            grad_V = (U.t().mm(X.t())).mm(dY)
+        if X_req_grad:
+            grad_input = (dY.mm(W.t() + V.t().mm(U.t()))).view(input.shape)
+        if b_req_grad:
+            grad_b = dY.sum(axis=0)
+        return grad_input, grad_W, grad_U, grad_V, grad_b
+    
+    @staticmethod
+    def backward7_flops(input, W, U, V, b):
+        X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
+                input.requires_grad, W.requires_grad, U.requires_grad, \
+                V.requires_grad, b.requires_grad if b is not None else None
+        nflops = 0
+        if U_req_grad:
+            nflops += prod(input.shape) * V.shape[1]
+            nflops += U.shape[0] * prod(V.shape)
+        if V_req_grad:
+            nflops += U.shape[1] * prod(input.shape)
+            nflops += prod(input.shape[:-1]) * prod(V.shape)
+        if X_req_grad: 
+            nflops += prod(U.shape) * V.shape[1]
+            nflops += prod(input.shape[:-1]) * prod(W.shape)
+
+        return 2 * nflops
+
+    @staticmethod
+    def backward8(ctx, grad_output):
+        """load(X,W,U,V) Z1=dYV' Z2=X'dY Z3=W'+V'U'
+        dU=X'Z1 dV=U'Z2 dX=dYZ3 db=dY.sum(axis=0)"""
+        input, W, U, V = ctx.saved_tensors
+        X = input.contiguous().view(-1, input.shape[-1])
+        dY = grad_output.contiguous().view(-1, grad_output.shape[-1])
+        X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
+            ctx.needs_input_grad
+        grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
+        if U_req_grad:
+            grad_U = X.t().mm(dY.mm(V.t()))
+        if V_req_grad:
+            grad_V = U.t().mm(X.t().mm(dY))
+        if X_req_grad:
+            grad_input = (dY.mm(W.t() + V.t().mm(U.t()))).view(input.shape)
+        if b_req_grad:
+            grad_b = dY.sum(axis=0)
+        return grad_input, grad_W, grad_U, grad_V, grad_b
+    
+    @staticmethod
+    def backward8_flops(input, W, U, V, b):
+        X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
+                input.requires_grad, W.requires_grad, U.requires_grad, \
+                V.requires_grad, b.requires_grad if b is not None else None
+        nflops = 0
+        if U_req_grad:
+            nflops += prod(input.shape[:-1]) * prod(V.shape)
+            nflops += prod(input.shape[:-1]) * prod(U.shape)
+        if V_req_grad:
+            nflops += prod(input.shape[:-1]) * prod(W.shape)
+            nflops += U.shape[0] * prod(V.shape)
+        if X_req_grad: 
+            nflops += U.shape[0] * prod(V.shape)
+            nflops += prod(input.shape[:-1]) * prod(W.shape)
+
+        return 2 * nflops
 
 
 light_lora_collection = LightLoRACollection()
