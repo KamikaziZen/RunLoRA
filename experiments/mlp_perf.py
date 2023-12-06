@@ -1,5 +1,5 @@
 import torch
-from lightlora import *
+from runlora import *
 from copy import deepcopy
 from time import time
 import torch.utils.benchmark as benchmark
@@ -7,7 +7,7 @@ from argparse import ArgumentParser
 import pandas as pd
 from torch.cuda.amp import custom_fwd, custom_bwd
 
-parser = ArgumentParser(prog="Parameters for LightLora")
+parser = ArgumentParser(prog="Parameters for RunLora")
 parser.add_argument("--n_batch", type=int, default=1)
 parser.add_argument("--n_seq", type=int, default=4096)
 parser.add_argument("--n_layer", type=int, default=1)
@@ -67,13 +67,13 @@ class MLPLoRA(torch.nn.Module):
             y = self.lora2[i](y)
         return y
 
-class MLPLightLoRA(torch.nn.Module):
+class MLPRunLoRA(torch.nn.Module):
     def __init__(self, n_layer, n_in, n_out, n_rank, fastest):
         super().__init__()
         self.n_layer = n_layer
-        self.lora1 = torch.nn.ModuleList([LightLoRA(n_in, n_out, n_rank, \
+        self.lora1 = torch.nn.ModuleList([RunLoRA(n_in, n_out, n_rank, \
                 bias=False, fastest=fastest) for i in range(n_layer)])
-        self.lora2 = torch.nn.ModuleList([LightLoRA(n_out, n_in, n_rank, \
+        self.lora2 = torch.nn.ModuleList([RunLoRA(n_out, n_in, n_rank, \
                 bias=False, fastest=fastest) for i in range(n_layer)])
 
     def forward(self, x):
@@ -145,11 +145,11 @@ rows.append({'note': 'MLPLoRA', **vars(args), **timestats})
 #strategies = ["flops", "benchmark", "benchmark_short"]
 strategies = ["flops", "benchmark_short"]
 for fastest in strategies:
-    mlp = MLPLightLoRA(args.n_layer, args.n_in, args.n_out, args.n_rank, \
+    mlp = MLPRunLoRA(args.n_layer, args.n_in, args.n_out, args.n_rank, \
             fastest)
-    timestats = mytimeit("MLPLightLoRA({})".format(fastest), mlp.flops(x))
+    timestats = mytimeit("MLPRunLoRA({})".format(fastest), mlp.flops(x))
     print()
-    rows.append({'note': 'MLPLightLoRA({})'.format(fastest), **vars(args), \
+    rows.append({'note': 'MLPRunLoRA({})'.format(fastest), **vars(args), \
             **timestats})
 
 df = pd.DataFrame.from_records(rows).drop(columns="out")
@@ -161,4 +161,4 @@ print(df.drop(columns=["n_batch", "n_seq", "n_layer", "n_in", "n_out", \
         "n_rank", "dtype"]))
 print()
 print("Best fwd and bwd by benchmarks short")
-print(light_lora_collection.benchmarks_short)
+print(run_lora_collection.benchmarks_short)

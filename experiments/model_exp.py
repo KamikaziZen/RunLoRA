@@ -1,6 +1,6 @@
-from lightlora.modeling import LightLoRAModel
+from runlora.modeling import RunLoRAModel
 from transformers import AutoConfig, AutoModelForCausalLM
-from lightlora import LightLoRACollection
+from runlora import RunLoRACollection
 import torch
 import torch.utils.benchmark as benchmark
 from peft import LoraConfig, get_peft_model
@@ -16,20 +16,32 @@ def parse_args(args):
 
     parser.add_argument('-m', '--model_name_or_config',
                         type=str,
-                        required=True)
-    parser.add_argument('--n_batch', type=int, default=10)
-    parser.add_argument('-r', '--lora_r', type=int, default=8)
-    parser.add_argument('-a', '--lora_alpha', type=int, default=8)
-    parser.add_argument('-d', '--lora_dropout', type=float, default=0.)
-    parser.add_argument('--dtype', type=str, default='fp32')
+                        required=True,
+                        help='path to config file or name'
+                        'of model available in transformers hub')
+    parser.add_argument('--n_batch', type=int, default=10, help='batch size')
+    parser.add_argument('-r', '--lora_r', type=int, default=8,
+                        help='rank of LoRA adapter')
+    parser.add_argument('-a', '--lora_alpha', type=int, default=8,
+                        help='LoRA scaling factor')
+    parser.add_argument('-d', '--lora_dropout', type=float, default=0.,
+                        help='dropout applied to LoRA adapter input')
+    parser.add_argument('--dtype', type=str, default='fp32',
+                        help='dtype of parameters and activations')
     parser.add_argument("--target_modules",
                         action="extend",
-                        nargs="+", type=str)
+                        nargs="+", type=str,
+                        help='list of modules eligible for LoRA adapters')
     parser.add_argument("--criterions",
                         action="extend",
-                        nargs="+", type=str)
-    parser.add_argument('--min_run_time', type=float, default=10.)
-    parser.add_argument('-o', "--out", type=str, required=False)
+                        nargs="+", type=str,
+                        help='criterions for best forward-backward'
+                        'pair estimation')
+    parser.add_argument('--min_run_time', type=float, default=10.,
+                        help='min time in seconds for running consecutive'
+                        'experiments in mean runtime estimation')
+    parser.add_argument('-o', "--out", type=str, required=False,
+                        help='prefix of output file')
 
     args = parser.parse_args(args)
 
@@ -138,20 +150,20 @@ def main(args):
     model = get_model(args)
 
     # looking for the best lora operator for given shapes
-    light_lora_collection = LightLoRACollection(min_run_time=args.min_run_time/2)
-    light_lora_mapping = \
-        light_lora_collection.optimize_for_model(
+    run_lora_collection = RunLoRACollection(min_run_time=args.min_run_time/2)
+    run_lora_mapping = \
+        run_lora_collection.optimize_for_model(
             model,
             n_batch=args.n_batch,
             lora_r=args.lora_r,
             target_modules=args.target_modules,
             criterions=args.criterions)
 
-    del model, light_lora_collection
+    del model, run_lora_collection
     reset_memory()
     print('Allocated:', torch.cuda.memory_allocated() / 2**20, 'MB')
 
-    # LightLoRA
+    # RunLoRA
     for criterion in args.criterions:
 
         # manage putting model to cuda only after replacing modules?
@@ -159,16 +171,16 @@ def main(args):
         params = sum(p.numel() for p in model.parameters())
         trainable_params = \
             sum(p.numel() for p in model.parameters() if p.requires_grad)
-        print(f'Total params before LightLoRA transform: {params}, '
-              f'Trainable params before LightLoRA transform: {trainable_params}')
+        print(f'Total params before RunLoRA transform: {params}, '
+              f'Trainable params before RunLoRA transform: {trainable_params}')
 
-        model = LightLoRAModel(model,
-                               light_lora_mapping[criterion],
-                               lora_r=args.lora_r,
-                               lora_alpha=args.lora_alpha,
-                               target_modules=args.target_modules)
+        model = RunLoRAModel(model,
+                             run_lora_mapping[criterion],
+                             lora_r=args.lora_r,
+                             lora_alpha=args.lora_alpha,
+                             target_modules=args.target_modules)
         model = model.to(args.dtype)
-        # memory is not immediately cleaned after lightlora transform
+        # memory is not immediately cleaned after runlora transform
         reset_memory()
         print(model)
         print('Allocated for Model:', torch.cuda.memory_allocated() / 2**20, 'MB')
@@ -176,13 +188,13 @@ def main(args):
         # Every parameter except for lora adapters is set to requires_grad=False
         model.prepare_for_finetuning()
         params = sum(p.numel() for p in model.parameters())
-        trainable_params_lightlora = \
+        trainable_params_runlora = \
             sum(p.numel() for p in model.parameters() if p.requires_grad)
-        print(f'Total params after LightLoRA transform: {params}, '
-              f'Trainable params after LightLoRA transform: {trainable_params_lightlora}')
+        print(f'Total params after RunLoRA transform: {params}, '
+              f'Trainable params after RunLoRA transform: {trainable_params_runlora}')
 
-        assert trainable_params_lightlora < trainable_params, \
-            "Number of trainable params after LightLoRA transform increased!"
+        assert trainable_params_runlora < trainable_params, \
+            "Number of trainable params after RunLoRA transform increased!"
 
         stats = bench_model(model, args)
         rows.append({'criterion': criterion,
@@ -195,7 +207,7 @@ def main(args):
         del model
         reset_memory()
 
-    del light_lora_mapping
+    del run_lora_mapping
     reset_memory()
     print('Allocated:', torch.cuda.memory_allocated() / 2**20, 'MB')
 
@@ -231,8 +243,8 @@ def main(args):
     assert trainable_params_lora < trainable_params, \
         "Number of trainable params after LoRA transform increased!"
 
-    assert trainable_params_lora == trainable_params_lightlora, \
-        "Number of trainable params after LoRA and LightLoRA transforms do not match!"
+    assert trainable_params_lora == trainable_params_runlora, \
+        "Number of trainable params after LoRA and RunLoRA transforms do not match!"
 
     stats = bench_model(model, args)
     rows.append({**vars(args), **stats})

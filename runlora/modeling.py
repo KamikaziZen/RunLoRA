@@ -21,8 +21,8 @@ class LoRALayer():
             self.lora_dropout = lambda x: x
 
 
-class LightLoRALinear(nn.Module, LoRALayer):
-    # TODO: dropout
+class RunLoRALinear(nn.Module, LoRALayer):
+    # TODO: dropout, scaling
     def __init__(
         self,
         in_features: int,
@@ -111,10 +111,10 @@ class LightLoRALinear(nn.Module, LoRALayer):
         return self
 
 
-class LightLoRAModel(nn.Module):
+class RunLoRAModel(nn.Module):
     def __init__(self,
                  model: PreTrainedModel,
-                 light_lora_mapping,
+                 run_lora_mapping,
                  target_modules: List[str],
                  lora_r: int,
                  lora_alpha: int,
@@ -137,10 +137,10 @@ class LightLoRAModel(nn.Module):
             if not any(trgt in module_name for trgt in target_modules):
                 continue
 
-            new_module = LightLoRALinear(
+            new_module = RunLoRALinear(
                 module.in_features,
                 module.out_features,
-                light_lora_mapping[module_name],
+                run_lora_mapping[module_name],
                 weight=None,
                 bias=module.bias,
                 lora_r=self.lora_r,
@@ -148,9 +148,9 @@ class LightLoRAModel(nn.Module):
                 lora_dropout=self.lora_dropout,
             )
 
-            # new_module = LightLoRALinear.from_linear(
+            # new_module = RunLoRALinear.from_linear(
             #     module,
-            #     light_lora_mapping[module_name],
+            #     run_lora_mapping[module_name],
             #     lora_r=self.lora_r,
             #     lora_alpha=self.lora_alpha,
             #     lora_dropout=self.lora_dropout,

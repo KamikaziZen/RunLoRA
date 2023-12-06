@@ -5,7 +5,24 @@ from math import prod
 from collections import defaultdict
 
 
-def timeit_lightlora(paths_f, paths_b, X, W, U, V, B, min_run_time=5.):
+def timeit_runlora(paths_f, paths_b, X, W, U, V, B, min_run_time=5.):
+    """Benchmarks mean runtime for specified forward and backward paths
+    and chooses the best F-B pair for provided dimensions.
+
+    Args:
+        paths_f (str): name of forward method
+        paths_b (str): name of backward method
+        X (torch.Tensor): input to linear layer
+        W (torch.Tensor): weights of linear layer
+        U (torch.Tensor): first LoRA adapter
+        V (torch.Tensor): second LoRA adapter
+        b (torch.Tensor): bias of linear layer
+        min_run_time (float, optional): Minimum number of seconds
+        used for consecutive runtime measurements. Defaults to 5.0.
+
+    Returns:
+        (str, str): names of the best forward-backward pair
+    """
     x = torch.zeros_like(X, requires_grad=X.requires_grad)
     w = torch.zeros_like(W, requires_grad=W.requires_grad)
     u = torch.zeros_like(U, requires_grad=U.requires_grad)
@@ -16,7 +33,7 @@ def timeit_lightlora(paths_f, paths_b, X, W, U, V, B, min_run_time=5.):
         b = None
 
     # Benchmark forward
-    statement = "light_lora.apply(x, w, u, v, b)"
+    statement = "run_lora.apply(x, w, u, v, b)"
     path_b = paths_b[0]
     best_path_f = -1
     best_path_time = torch.inf
@@ -24,8 +41,8 @@ def timeit_lightlora(paths_f, paths_b, X, W, U, V, B, min_run_time=5.):
         x.grad, w.grad, u.grad, v.grad = [None] * 4
         if b is not None:
             b.grad = None
-        light_lora = light_lora_collection[path_f, path_b]
-        globals_ = {'light_lora': light_lora, 'x': x,
+        run_lora = run_lora_collection[path_f, path_b]
+        globals_ = {'run_lora': run_lora, 'x': x,
                     'w': w, 'u': u, 'v': v, 'b': b}
         bench = benchmark.Timer(stmt=statement, globals=globals_)
         _ = bench.blocked_autorange(min_run_time=min_run_time)
@@ -44,8 +61,8 @@ def timeit_lightlora(paths_f, paths_b, X, W, U, V, B, min_run_time=5.):
         x.grad, w.grad, u.grad, v.grad = [None] * 4
         if b is not None:
             b.grad = None
-        light_lora = light_lora_collection[path_f, path_b]
-        loss = light_lora.apply(x, w, u, v, b).sum().requires_grad_(True)
+        run_lora = run_lora_collection[path_f, path_b]
+        loss = run_lora.apply(x, w, u, v, b).sum().requires_grad_(True)
         globals_ = {'loss': loss}
         bench = benchmark.Timer(stmt=statement, globals=globals_)
         _ = bench.blocked_autorange(min_run_time=1)
@@ -59,16 +76,28 @@ def timeit_lightlora(paths_f, paths_b, X, W, U, V, B, min_run_time=5.):
     return best_path_f, best_path_b
 
 
-class LightLoRACollection(object):
+class RunLoRACollection(object):
+    """Factory for RunLoRA class.
+    Contains all possible forward and backward implementations
+    and methods to determine the best F-B pair
+    based on provided criterion and dimensions.
+    """
     def __init__(self, min_run_time=5.):
-        self.forward_keys = [i for i in dir(self) \
+        """
+        Args:
+            min_run_time (float, optional): Minimum number of seconds
+            used for consecutive runtime measurements. Defaults to 5.0.
+        """
+        self.forward_keys = \
+            [i for i in dir(self)
                 if i.startswith("forward") and i[-5:] != "flops"]
-        self.backward_keys = [i for i in dir(self) \
+        self.backward_keys = \
+            [i for i in dir(self)
                 if i.startswith("backward") and i[-5:] != "flops"]
-        self.forward_keys_short = ["forward{}".format(i) \
-                for i in range(1, 5)]
-        self.backward_keys_short = ["backward{}".format(i) \
-                for i in range(1, 9)]
+        self.forward_keys_short = \
+            ["forward{}".format(i) for i in range(1, 5)]
+        self.backward_keys_short = \
+            ["backward{}".format(i) for i in range(1, 9)]
 
         self.flops_benchmarks = {}
         self.time_benchmarks = {}
@@ -89,18 +118,34 @@ class LightLoRACollection(object):
         method_forward_flops = getattr(self, path_f_flops)
         method_backward_flops = getattr(self, path_b_flops)
 
-        class LightLoRA(torch.autograd.Function):
+        class RunLoRA(torch.autograd.Function):
             forward = method_forward
             backward = method_backward
 
             def flops(input, W, U, V, b):
                 return method_forward_flops(input, W, U, V, b) \
-                    + method_backward_flops(input, W, U, V, b)
-        return LightLoRA
+                       + method_backward_flops(input, W, U, V, b)
+        return RunLoRA
 
-    def optimize_for_model(self, model, n_batch, lora_r, target_modules, criterions):
+    def optimize_for_model(self, model, n_batch, lora_r,
+                           target_modules, criterions):
+        """Optimizes LoRA implementations for a given model.
+        For each module specified in target_modules the best 
+        forward-backward pair is estimated.
 
-        light_lora_mapping = defaultdict(dict)
+        Args:
+            model (torch.): _description_
+            n_batch (int): batch size
+            lora_r (int): rank of lora adapters
+            target_modules (list[str]): list of modules
+            that are eligible for estimations
+            criterions (list[str]): one or more of [flops, time, time_short]
+
+        Returns:
+            dict: A mapping from module name to a corresponding RunLoRA class
+            which contains best F-B pair for this module.
+        """
+        run_lora_mapping = defaultdict(dict)
 
         for module_name, module in model.named_modules():
             if not isinstance(module, nn.Linear):
@@ -125,12 +170,25 @@ class LightLoRACollection(object):
                     v = torch.randn(lora_r, module.out_features, requires_grad=True)
                     _ = self.get_best(criterion, x, w, u, v)
 
-                light_lora_mapping[criterion][module_name] = \
+                run_lora_mapping[criterion][module_name] = \
                     self.lookup_best(criterion, key)
 
-        return light_lora_mapping
+        return run_lora_mapping
 
     def get_best_by_flops(self, X, W, U, V, b):
+        """Returns names of the best (based on FLOPs estimation) forward
+        and backward functions for a given input and parameter dimensions
+
+        Args:
+            X (torch.Tensor): input to linear layer
+            W (torch.Tensor): weights of linear layer
+            U (torch.Tensor): first LoRA adapter
+            V (torch.Tensor): second LoRA adapter
+            b (torch.Tensor): bias of linear layer
+
+        Returns:
+            (str, str): names of the best forward-backward pair
+        """
         if b is not None:
             key = (X.shape, X.requires_grad, W.shape, W.requires_grad,
                    U.shape, U.requires_grad, V.shape, V.requires_grad,
@@ -140,7 +198,8 @@ class LightLoRACollection(object):
                    U.shape, U.requires_grad, V.shape, V.requires_grad)
 
         if key not in self.flops_benchmarks:
-            path_f_flops = [getattr(self, key+"_flops")(X, W, U, V, b) \
+            path_f_flops = \
+                [getattr(self, key+"_flops")(X, W, U, V, b)
                     for key in self.forward_keys_short]
             path_f_index = 0
             for i in range(len(path_f_flops)):
@@ -149,7 +208,8 @@ class LightLoRACollection(object):
                     path_f_index = i
             print()
 
-            path_b_flops = [getattr(self, key+"_flops")(X, W, U, V, b) \
+            path_b_flops = \
+                [getattr(self, key+"_flops")(X, W, U, V, b)
                     for key in self.backward_keys_short]
             path_b_index = 0
             for i in range(len(path_b_flops)):
@@ -166,6 +226,20 @@ class LightLoRACollection(object):
         return self.flops_benchmarks[key]
 
     def get_best_by_time(self, X, W, U, V, b):
+        """Returns names of the best (based on runtime estimation) forward
+        and backward functions for a given input and parameter dimensions.
+        Estimations are run on the long list of backward implementations.
+
+        Args:
+            X (torch.Tensor): input to linear layer
+            W (torch.Tensor): weights of linear layer
+            U (torch.Tensor): first LoRA adapter
+            V (torch.Tensor): second LoRA adapter
+            b (torch.Tensor): bias of linear layer
+
+        Returns:
+            (str, str): names of the best forward-backward pair
+        """
         if b is not None:
             key = (X.shape, X.requires_grad, W.shape, W.requires_grad,
                    U.shape, U.requires_grad, V.shape, V.requires_grad,
@@ -174,14 +248,28 @@ class LightLoRACollection(object):
             key = (X.shape, X.requires_grad, W.shape, W.requires_grad,
                    U.shape, U.requires_grad, V.shape, V.requires_grad)
         if key not in self.time_benchmarks:
-            path_f, path_b = timeit_lightlora(self.forward_keys,
-                                              self.backward_keys,
-                                              X, W, U, V, b,
-                                              min_run_time=self.min_run_time)
+            path_f, path_b = timeit_runlora(self.forward_keys,
+                                            self.backward_keys,
+                                            X, W, U, V, b,
+                                            min_run_time=self.min_run_time)
             self.time_benchmarks[key] = (path_f, path_b)
         return self.time_benchmarks[key]
 
     def get_best_by_time_short(self, X, W, U, V, b):
+        """Returns names of the best (based on runtime estimation) forward
+        and backward functions for a given input and parameter dimensions.
+        Estimations are run on the short list of backward implementations.
+
+        Args:
+            X (torch.Tensor): input to linear layer
+            W (torch.Tensor): weights of linear layer
+            U (torch.Tensor): first LoRA adapter
+            V (torch.Tensor): second LoRA adapter
+            b (torch.Tensor): bias of linear layer
+
+        Returns:
+            (str, str): names of the best forward-backward pair
+        """
         if b is not None:
             key = (X.shape, X.requires_grad, W.shape, W.requires_grad,
                    U.shape, U.requires_grad, V.shape, V.requires_grad,
@@ -190,24 +278,55 @@ class LightLoRACollection(object):
             key = (X.shape, X.requires_grad, W.shape, W.requires_grad,
                    U.shape, U.requires_grad, V.shape, V.requires_grad)
         if key not in self.time_benchmarks_short:
-            path_f, path_b = timeit_lightlora(self.forward_keys_short, 
-                                              self.backward_keys_short,
-                                              X, W, U, V, b,
-                                              min_run_time=self.min_run_time)
+            path_f, path_b = timeit_runlora(self.forward_keys_short,
+                                            self.backward_keys_short,
+                                            X, W, U, V, b,
+                                            min_run_time=self.min_run_time)
             self.time_benchmarks_short[key] = (path_f, path_b)
         return self.time_benchmarks_short[key]
 
-    def get_best(self, criterion, x, W, U, V, b=None):
+    def get_best(self, criterion, X, W, U, V, b=None):
+        """Returns class RunLoRA (child of torch.autograd.Function)
+        with best forward-backward pair
+        (based on criterion and input and parameter dimensions).
+
+        Args:
+            criterion (str): one of [flops, time_short, time]
+            X (torch.Tensor): input to linear layer
+            W (torch.Tensor): weights of linear layer
+            U (torch.Tensor): first LoRA adapter
+            V (torch.Tensor): second LoRA adapter
+            b (torch.Tensor): bias of linear layer. Defaults to None.
+
+        Returns:
+            class: RunLoRA
+        """
         if criterion == "flops":
-            path_f, path_b = self.get_best_by_flops(x, W, U, V, b)
+            path_f, path_b = self.get_best_by_flops(X, W, U, V, b)
         elif criterion == "time":
-            path_f, path_b = self.get_best_by_time(x, W, U, V, b)
+            path_f, path_b = self.get_best_by_time(X, W, U, V, b)
         elif criterion == "time_short":
-            path_f, path_b = self.get_best_by_time_short(x, W, U, V, b)
+            path_f, path_b = self.get_best_by_time_short(X, W, U, V, b)
 
         return self.__getitem__((path_f, path_b))
 
     def lookup_best(self, criterion, key):
+        """Lookup best forward-backward pair if it was already estimated.
+        Return None if the best F-B pair for such criterion and dimensions
+        has not been estimated yet.
+
+        Args:
+            criterion (str): on of [flops, time, time_short]
+            key (tuple(torch.Size)): containes shapes of weights,
+            input, lora adapters and their gradient requirements.
+
+        Raises:
+            ValueError: If provided criterion
+            is not in the list of supported criterions.
+
+        Returns:
+            class: RunLoRA
+        """
         try:
             if criterion == 'flops':
                 path_f, path_b = self.flops_benchmarks[key]
@@ -256,6 +375,19 @@ class LightLoRACollection(object):
 
     @staticmethod
     def forward1_flops(input, W, U, V, b):
+        """Calculate number of flops
+        required to compute forward1 outputs
+
+        Args:
+            input (torch.Tensor): input to linear layer
+            W (torch.Tensor): weights of linear layer
+            U (torch.Tensor): first LoRA adapter
+            V (torch.Tensor): second LoRA adapter
+            b (torch.Tensor): bias of linear layer
+
+        Returns:
+            int: number of FlOPs
+        """
         nflops = 0
         # input .mm (W)
         nflops += 2 * prod(input.shape) * W.shape[1]
@@ -278,6 +410,19 @@ class LightLoRACollection(object):
 
     @staticmethod
     def forward2_flops(input, W, U, V, b):
+        """Calculate number of flops
+        required to compute forward1 outputs
+
+        Args:
+            input (torch.Tensor): input to linear layer
+            W (torch.Tensor): weights of linear layer
+            U (torch.Tensor): first LoRA adapter
+            V (torch.Tensor): second LoRA adapter
+            b (torch.Tensor): bias of linear layer
+
+        Returns:
+            int: number of FlOPs
+        """
         nflops = 0
         # W .addmm (U, V)
         nflops += 2 * U.shape[0] * U.shape[1] * V.shape[1]
@@ -298,6 +443,19 @@ class LightLoRACollection(object):
 
     @staticmethod
     def forward3_flops(input, W, U, V, b):
+        """Calculate number of flops
+        required to compute forward1 outputs
+
+        Args:
+            input (torch.Tensor): input to linear layer
+            W (torch.Tensor): weights of linear layer
+            U (torch.Tensor): first LoRA adapter
+            V (torch.Tensor): second LoRA adapter
+            b (torch.Tensor): bias of linear layer
+
+        Returns:
+            int: number of FlOPs
+        """
         nflops = 0
         # input .mm (W)
         nflops += 2 * prod(input.shape) * W.shape[1]
@@ -318,6 +476,19 @@ class LightLoRACollection(object):
 
     @staticmethod
     def forward4_flops(input, W, U, V, b):
+        """Calculate number of flops
+        required to compute forward1 outputs
+
+        Args:
+            input (torch.Tensor): input to linear layer
+            W (torch.Tensor): weights of linear layer
+            U (torch.Tensor): first LoRA adapter
+            V (torch.Tensor): second LoRA adapter
+            b (torch.Tensor): bias of linear layer
+
+        Returns:
+            int: number of FlOPs
+        """
         nflops = 0
         # W .addmm (U, V)
         nflops += 2 * U.shape[0] * U.shape[1] * V.shape[1]
@@ -545,6 +716,19 @@ class LightLoRACollection(object):
 
     @staticmethod
     def backward1_flops(input, W, U, V, b):
+        """Calculate number of flops
+        required to compute backward1 outputs
+
+        Args:
+            input (torch.Tensor): input to linear layer
+            W (torch.Tensor): weights of linear layer
+            U (torch.Tensor): first LoRA adapter
+            V (torch.Tensor): second LoRA adapter
+            b (torch.Tensor): bias of linear layer
+
+        Returns:
+            int: number of FlOPs
+        """
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
                 input.requires_grad, W.requires_grad, U.requires_grad, \
                 V.requires_grad, b.requires_grad if b is not None else None
@@ -1023,7 +1207,7 @@ class LightLoRACollection(object):
         X = input.contiguous().view(-1, X_shape[-1])
         dY = grad_output.contiguous().view(-1, grad_output.shape[-1])
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
-                ctx.needs_input_grad
+            ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
         Z1, Z2 = [None] * 2
         if V_req_grad:
@@ -1048,6 +1232,19 @@ class LightLoRACollection(object):
 
     @staticmethod
     def backward2_flops(input, W, U, V, b):
+        """Calculate number of flops
+        required to compute backward2 outputs
+
+        Args:
+            input (torch.Tensor): input to linear layer
+            W (torch.Tensor): weights of linear layer
+            U (torch.Tensor): first LoRA adapter
+            V (torch.Tensor): second LoRA adapter
+            b (torch.Tensor): bias of linear layer
+
+        Returns:
+            int: number of FlOPs
+        """
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
                 input.requires_grad, W.requires_grad, U.requires_grad, \
                 V.requires_grad, b.requires_grad if b is not None else None
@@ -1348,6 +1545,19 @@ class LightLoRACollection(object):
 
     @staticmethod
     def backward3_flops(input, W, U, V, b):
+        """Calculate number of flops
+        required to compute backward3 outputs
+
+        Args:
+            input (torch.Tensor): input to linear layer
+            W (torch.Tensor): weights of linear layer
+            U (torch.Tensor): first LoRA adapter
+            V (torch.Tensor): second LoRA adapter
+            b (torch.Tensor): bias of linear layer
+
+        Returns:
+            int: number of FlOPs
+        """
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
                 input.requires_grad, W.requires_grad, U.requires_grad, \
                 V.requires_grad, b.requires_grad if b is not None else None
@@ -1486,6 +1696,19 @@ class LightLoRACollection(object):
 
     @staticmethod
     def backward4_flops(input, W, U, V, b):
+        """Calculate number of flops
+        required to compute backward4 outputs
+
+        Args:
+            input (torch.Tensor): input to linear layer
+            W (torch.Tensor): weights of linear layer
+            U (torch.Tensor): first LoRA adapter
+            V (torch.Tensor): second LoRA adapter
+            b (torch.Tensor): bias of linear layer
+
+        Returns:
+            int: number of FlOPs
+        """
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
                 input.requires_grad, W.requires_grad, U.requires_grad, \
                 V.requires_grad, b.requires_grad if b is not None else None
@@ -1656,6 +1879,19 @@ class LightLoRACollection(object):
 
     @staticmethod
     def backward5_flops(input, W, U, V, b):
+        """Calculate number of flops
+        required to compute backward5 outputs
+
+        Args:
+            input (torch.Tensor): input to linear layer
+            W (torch.Tensor): weights of linear layer
+            U (torch.Tensor): first LoRA adapter
+            V (torch.Tensor): second LoRA adapter
+            b (torch.Tensor): bias of linear layer
+
+        Returns:
+            int: number of FlOPs
+        """
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
                 input.requires_grad, W.requires_grad, U.requires_grad, \
                 V.requires_grad, b.requires_grad if b is not None else None
@@ -1679,7 +1915,7 @@ class LightLoRACollection(object):
         if X_req_grad:
             nflops += 2 * prod(input.shape) * W.shape[1]
         return nflops
-    
+
     @staticmethod
     def backward6(ctx, grad_output):
         """load(X,W,U,V) Z1=X'dY Z2=U'X' Z3=dYV'
@@ -1699,9 +1935,22 @@ class LightLoRACollection(object):
         if b_req_grad:
             grad_b = dY.sum(axis=0)
         return grad_input, grad_W, grad_U, grad_V, grad_b
-    
+
     @staticmethod
     def backward6_flops(input, W, U, V, b):
+        """Calculate number of flops
+        required to compute backward6 outputs
+
+        Args:
+            input (torch.Tensor): input to linear layer
+            W (torch.Tensor): weights of linear layer
+            U (torch.Tensor): first LoRA adapter
+            V (torch.Tensor): second LoRA adapter
+            b (torch.Tensor): bias of linear layer
+
+        Returns:
+            int: number of FlOPs
+        """
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
                 input.requires_grad, W.requires_grad, U.requires_grad, \
                 V.requires_grad, b.requires_grad if b is not None else None
@@ -1718,7 +1967,7 @@ class LightLoRACollection(object):
             nflops += prod(input.shape[:-1]) * prod(U.shape)
 
         return 2 * nflops
-    
+
     @staticmethod
     def backward7(ctx, grad_output):
         """load(X,W,U,V) Z1=X'dY Z2=U'X' Z3=W'+V'U'
@@ -1738,9 +1987,22 @@ class LightLoRACollection(object):
         if b_req_grad:
             grad_b = dY.sum(axis=0)
         return grad_input, grad_W, grad_U, grad_V, grad_b
-    
+
     @staticmethod
     def backward7_flops(input, W, U, V, b):
+        """Calculate number of flops
+        required to compute backward7 outputs
+
+        Args:
+            input (torch.Tensor): input to linear layer
+            W (torch.Tensor): weights of linear layer
+            U (torch.Tensor): first LoRA adapter
+            V (torch.Tensor): second LoRA adapter
+            b (torch.Tensor): bias of linear layer
+
+        Returns:
+            int: number of FlOPs
+        """
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
                 input.requires_grad, W.requires_grad, U.requires_grad, \
                 V.requires_grad, b.requires_grad if b is not None else None
@@ -1776,9 +2038,22 @@ class LightLoRACollection(object):
         if b_req_grad:
             grad_b = dY.sum(axis=0)
         return grad_input, grad_W, grad_U, grad_V, grad_b
-    
+
     @staticmethod
     def backward8_flops(input, W, U, V, b):
+        """Calculate number of flops
+        required to compute backward8 outputs
+
+        Args:
+            input (torch.Tensor): input to linear layer
+            W (torch.Tensor): weights of linear layer
+            U (torch.Tensor): first LoRA adapter
+            V (torch.Tensor): second LoRA adapter
+            b (torch.Tensor): bias of linear layer
+
+        Returns:
+            int: number of FlOPs
+        """
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
                 input.requires_grad, W.requires_grad, U.requires_grad, \
                 V.requires_grad, b.requires_grad if b is not None else None
@@ -1789,55 +2064,11 @@ class LightLoRACollection(object):
         if V_req_grad:
             nflops += prod(input.shape[:-1]) * prod(W.shape)
             nflops += U.shape[0] * prod(V.shape)
-        if X_req_grad: 
+        if X_req_grad:
             nflops += U.shape[0] * prod(V.shape)
             nflops += prod(input.shape[:-1]) * prod(W.shape)
 
         return 2 * nflops
 
 
-light_lora_collection = LightLoRACollection()
-
-
-# class LightLoRA(torch.nn.Linear):
-#     def __init__(self, in_features, out_features, rank, bias=True,
-#                  device=None, dtype=None, fastest: str = "flops"):
-#         if fastest not in ["flops", "benchmark", "benchmark_short"]:
-#             raise ValueError("Possible values for \"fastest\" are " \
-#                     "\"flops\", \"benchmark\", \"benchmark_short\"")
-#         super().__init__(in_features, out_features, bias, device, dtype)
-#         self.fastest = fastest
-#         self.U = torch.nn.Parameter(torch.randn(in_features, rank,
-#                                     device=device, dtype=dtype))
-#         self.V = torch.nn.Parameter(torch.randn(rank, out_features,
-#                                     device=device, dtype=dtype))
-#         self.weight.requires_grad = False
-    
-#     def forward(self, x):
-#         if self.fastest == "flops":
-#             path_f, path_b = light_lora_collection.get_best_by_flops(
-#                 x, self.weight.t(), self.U, self.V, self.bias)
-#         elif self.fastest == "benchmark":
-#             path_f, path_b = light_lora_collection.get_best_by_bench(
-#                 x, self.weight.t(), self.U, self.V, self.bias)
-#         elif self.fastest == "benchmark_short":
-#             path_f, path_b = light_lora_collection.get_best_by_bench_short(
-#                 x, self.weight.t(), self.U, self.V, self.bias)
-#         y = light_lora_collection[path_f, path_b].apply(
-#             x, self.weight.t(), self.U, self.V, self.bias)
-#         return y
-
-#     def flops(self, x):
-#         if self.fastest == "flops":
-#             path_f, path_b = light_lora_collection.get_best_by_flops(x, \
-#                     self.weight.t(), self.U, self.V, self.bias)
-#         elif self.fastest == "benchmark":
-#             path_f, path_b = light_lora_collection.get_best_by_bench(x, \
-#                     self.weight.t(), self.U, self.V, self.bias)
-#         elif self.fastest == "benchmark_short":
-#             path_f, path_b = light_lora_collection.get_best_by_bench_short(x, \
-#                     self.weight.t(), self.U, self.V, self.bias)
-#         nflops = light_lora_collection[path_f, path_b].flops(x, \
-#                 self.weight.t(), self.U, self.V, self.bias)
-#         return nflops
-
+run_lora_collection = RunLoRACollection()

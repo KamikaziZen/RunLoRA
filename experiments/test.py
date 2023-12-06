@@ -1,5 +1,5 @@
 import torch
-from lightlora import *
+from runlora import *
 from copy import deepcopy
 
 device = torch.device("cuda")
@@ -16,31 +16,31 @@ loss.backward()
 x_grad, u_grad, v_grad, b_grad = deepcopy(x.grad), deepcopy(u.grad), \
         deepcopy(v.grad), deepcopy(b.grad)
 
-# Check all forward light_lora_collection paths
-path_b = light_lora_collection.backward_keys[0]
-for path_f in light_lora_collection.forward_keys:
+# Check all forward run_lora_collection paths
+path_b = run_lora_collection.backward_keys[0]
+for path_f in run_lora_collection.forward_keys:
     print("Check forward path_f={}".format(path_f))
-    light_lora = light_lora_collection[path_f, path_b].apply
-    y1 = light_lora(x, w, u, v, b)
+    run_lora = run_lora_collection[path_f, path_b].apply
+    y1 = run_lora(x, w, u, v, b)
     print("y: ", torch.norm(y1-y) / torch.norm(y))
     print()
 
-# Check all backward light_lora_collection paths for all possible requires_grad
+# Check all backward run_lora_collection paths for all possible requires_grad
 # flags for x, w, u, v and b
 for req_grad_flags in range(1, 2**4):
     x.requires_grad = bool(req_grad_flags & 1)
     u.requires_grad = bool(req_grad_flags & 2)
     v.requires_grad = bool(req_grad_flags & 4)
     b.requires_grad = bool(req_grad_flags & 8)
-    path_f = light_lora_collection.forward_keys[0]
-    for path_b in light_lora_collection.backward_keys:
+    path_f = run_lora_collection.forward_keys[0]
+    for path_b in run_lora_collection.backward_keys:
         x.grad, u.grad, v.grad, b.grad = None, None, None, None
         print("Check backward path_f={} path_b={}".format(path_f, path_b))
         print("x.requires_grad={} u.requires_grad={} v.requires_grad={} "
                 "b_requires_grad={}".format(x.requires_grad, u.requires_grad, \
                         v.requires_grad, b.requires_grad))
-        light_lora = light_lora_collection[path_f, path_b].apply
-        y1 = light_lora(x, w, u, v, b)
+        run_lora = run_lora_collection[path_f, path_b].apply
+        y1 = run_lora(x, w, u, v, b)
         loss = y1.sum()
         loss.backward()
         if x.requires_grad:
@@ -61,30 +61,30 @@ loss = y.sum()
 loss.backward()
 x_grad, u_grad, v_grad = deepcopy(x.grad), deepcopy(u.grad), deepcopy(v.grad)
 
-# Check all forward light_lora_collection paths
-path_b = light_lora_collection.backward_keys[0]
-for path_f in light_lora_collection.forward_keys:
+# Check all forward run_lora_collection paths
+path_b = run_lora_collection.backward_keys[0]
+for path_f in run_lora_collection.forward_keys:
     print("Check forward path_f={}".format(path_f))
-    light_lora = light_lora_collection[path_f, path_b].apply
-    y1 = light_lora(x, w, u, v, b)
+    run_lora = run_lora_collection[path_f, path_b].apply
+    y1 = run_lora(x, w, u, v, b)
     print("y: ", torch.norm(y1-y) / torch.norm(y))
     print()
 
-# Check all backward light_lora_collection paths for all possible requires_grad
+# Check all backward run_lora_collection paths for all possible requires_grad
 # flags for x, w, u, v and b
 for req_grad_flags in range(1, 2**3):
     x.requires_grad = bool(req_grad_flags & 1)
     u.requires_grad = bool(req_grad_flags & 2)
     v.requires_grad = bool(req_grad_flags & 4)
-    path_f = light_lora_collection.forward_keys[0]
-    for path_b in light_lora_collection.backward_keys:
+    path_f = run_lora_collection.forward_keys[0]
+    for path_b in run_lora_collection.backward_keys:
         x.grad, u.grad, v.grad = None, None, None
         print("Check backward path_f={} path_b={}".format(path_f, path_b))
         print("x.requires_grad={} u.requires_grad={} v.requires_grad={}" \
                 .format(x.requires_grad, u.requires_grad, \
                         v.requires_grad))
-        light_lora = light_lora_collection[path_f, path_b].apply
-        y1 = light_lora(x, w, u, v, b)
+        run_lora = run_lora_collection[path_f, path_b].apply
+        y1 = run_lora(x, w, u, v, b)
         loss = y1.sum()
         loss.backward()
         if x.requires_grad:

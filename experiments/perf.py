@@ -1,5 +1,5 @@
 import torch
-from lightlora import light_lora_collection
+from runlora import run_lora_collection
 import torch.utils.benchmark as benchmark
 from argparse import ArgumentParser
 import pandas as pd
@@ -7,7 +7,7 @@ import pandas as pd
 
 # TODO: default config class which reads from config file
 def parse_args(args):
-    parser = ArgumentParser(prog="Parameters for LightLora")
+    parser = ArgumentParser(prog="Parameters for RunLora")
     parser.add_argument("--n_batch", type=int, default=1)
     parser.add_argument("--n_seq", type=int, default=4096)
     parser.add_argument("--n_in", type=int, default=1024)
@@ -54,29 +54,29 @@ def mytimeit(statement, glbls):
             'msrs/runs': f'{len(measure.times)}/{measure.number_per_run}'}
 
 
-def mytimeit_lightlora(*vars, path_f, path_b):
+def mytimeit_runlora(*vars, path_f, path_b):
     x, w, u, v, b = vars
     print("path_f={} path_b={}".format(path_f, path_b))
-    # global light_lora
-    light_lora = light_lora_collection[path_f, path_b]
-    glbls = {'w': w, 'x': x, 'u': u, 'v': v, 'b': b, 'light_lora': light_lora}
-    return mytimeit("light_lora.apply(x, w, u, v, b).sum().backward()", glbls)
+    # global run_lora
+    run_lora = run_lora_collection[path_f, path_b]
+    glbls = {'w': w, 'x': x, 'u': u, 'v': v, 'b': b, 'run_lora': run_lora}
+    return mytimeit("run_lora.apply(x, w, u, v, b).sum().backward()", glbls)
 
 
-def mytimeit_lightlora_fwd(*vars, path_f, path_b):
+def mytimeit_runlora_fwd(*vars, path_f, path_b):
     x, w, u, v, b = vars
     print("path_f={} path_b={}".format(path_f, path_b))
-    global light_lora
-    light_lora = light_lora_collection[path_f, path_b]
-    glbls = {'w': w, 'x': x, 'u': u, 'v': v, 'b': b, 'light_lora': light_lora}
-    return mytimeit("light_lora.apply(x, w, u, v, b)", glbls)
+    global run_lora
+    run_lora = run_lora_collection[path_f, path_b]
+    glbls = {'w': w, 'x': x, 'u': u, 'v': v, 'b': b, 'run_lora': run_lora}
+    return mytimeit("run_lora.apply(x, w, u, v, b)", glbls)
 
 
-def mytimeit_lightlora_bwd(*vars, path_f, path_b):
+def mytimeit_runlora_bwd(*vars, path_f, path_b):
     x, w, u, v, b = vars
     print("path_f={} path_b={}".format(path_f, path_b))
-    global light_lora
-    y = light_lora_collection[path_f, path_b].apply(x, w, u, v, b)
+    global run_lora
+    y = run_lora_collection[path_f, path_b].apply(x, w, u, v, b)
     glbls = {'y': y}
     return mytimeit("y.sum().backward(retain_graph=True)", glbls)
 
@@ -165,38 +165,38 @@ def main(args):
 
     # Find the fastest forward+backward
     if args.short == "True":
-        fwd_keys = light_lora_collection.forward_keys_short
-        bwd_keys = light_lora_collection.backward_keys_short
+        fwd_keys = run_lora_collection.forward_keys_short
+        bwd_keys = run_lora_collection.backward_keys_short
     else:
-        fwd_keys = light_lora_collection.forward_keys
-        bwd_keys = light_lora_collection.backward_keys
+        fwd_keys = run_lora_collection.forward_keys
+        bwd_keys = run_lora_collection.backward_keys
 
     # forward1 and backward1 as a baseline
     fast_f = fwd_keys[0]
     fast_b = bwd_keys[0]
-    timestats = mytimeit_lightlora(*variables,
+    timestats = mytimeit_runlora(*variables,
                                    path_f=fast_f, path_b=fast_b)
     rows.append({'path_f': fast_f, 'path_b': fast_b,
-                 'statement': "light_lora.apply(x, w, u, v, b)"
+                 'statement': "run_lora.apply(x, w, u, v, b)"
                  ".sum().backward()",
                  **vars(args), **timestats})
 
     fast_mean = torch.inf
     for path_f in fwd_keys:
-        timestats = mytimeit_lightlora_fwd(*variables,
+        timestats = mytimeit_runlora_fwd(*variables,
                                            path_f=path_f, path_b=fast_b)
         rows.append({'path_f': path_f,  # no backward path
-                     'statement': "light_lora.apply(x, w, u, v, b)",
+                     'statement': "run_lora.apply(x, w, u, v, b)",
                      **vars(args), **timestats})
         if fast_mean > timestats['mean_time']:
             fast_f = path_f
             fast_mean = timestats['mean_time']
     fast_mean = torch.inf
     for path_b in bwd_keys:
-        timestats = mytimeit_lightlora(*variables,
+        timestats = mytimeit_runlora(*variables,
                                        path_f=fast_f, path_b=path_b)
         rows.append({'path_f': fast_f, 'path_b': path_b,
-                     'statement': "light_lora.apply(x, w, u, v, b)"
+                     'statement': "run_lora.apply(x, w, u, v, b)"
                      ".sum().backward()",
                      **vars(args), **timestats})
         if fast_mean > timestats['mean_time']:

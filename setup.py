@@ -1,9 +1,12 @@
 from setuptools import setup
 
 setup(
-   name='lightlora',
-   version='0.1',
+   name='runlora',
+   version='1.0.0',
+   license='MIT',
+   author='Aleksandr Mikhalev and Daria Cherniuk',
+   author_email='al.mikhalev@skoltech.ru, daria.cherniuk@skoltech.ru, kamikazizen@gmail.com',
    description='Fast and Furious lora implementations',
-   packages=['lightlora'],
-   install_requires=['transformers', 'peft', 'bitsandbytes']
+   packages=['runlora'],
+   install_requires=['transformers', 'peft', 'bitsandbytes', 'scipy==1.10.1']
 )
