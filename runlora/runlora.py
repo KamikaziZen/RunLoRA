@@ -154,8 +154,10 @@ class RunLoRACollection(object):
             if not any(trgt in module_name for trgt in target_modules):
                 continue
 
+            # is this the best option?
+            max_sequence_length = model.config.max_sequence_length if hasattr(model.config, 'max_sequence_length') else model.config.max_position_embeddings
             key = (
-                torch.Size([n_batch, model.config.max_sequence_length, module.in_features]), True,
+                torch.Size([n_batch, max_sequence_length, module.in_features]), True,
                 torch.Size([module.in_features, module.out_features]), False,
                 torch.Size([module.in_features, lora_r]), True,
                 torch.Size([lora_r, module.out_features]), True,
@@ -165,7 +167,7 @@ class RunLoRACollection(object):
                 if not self.lookup_best(criterion, key):
                     print(f'Did not find criterion {criterion} for {module_name}. Calculating')
                     w = nn.Parameter(torch.randn(module.in_features, module.out_features), requires_grad=False)
-                    x = torch.randn(n_batch, model.config.max_sequence_length, module.in_features, requires_grad=True)
+                    x = torch.randn(n_batch, max_sequence_length, module.in_features, requires_grad=True)
                     u = torch.randn(module.in_features, lora_r, requires_grad=True)
                     v = torch.randn(lora_r, module.out_features, requires_grad=True)
                     _ = self.get_best(criterion, x, w, u, v)
@@ -1737,6 +1739,7 @@ class RunLoRACollection(object):
         input, W, U, V = ctx.saved_tensors
         X = input.contiguous().view(-1, input.shape[-1])
         dY = grad_output.contiguous().view(-1, grad_output.shape[-1])
+        # print('debug', X.dtype, dY.dtype, V.dtype, U.dtype)
         X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
             ctx.needs_input_grad
         grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5

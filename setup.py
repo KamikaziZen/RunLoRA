@@ -8,5 +8,5 @@ setup(
    author_email='al.mikhalev@skoltech.ru, daria.cherniuk@skoltech.ru, kamikazizen@gmail.com',
    description='Fast and Furious lora implementations',
    packages=['runlora'],
-   install_requires=['transformers', 'peft', 'bitsandbytes', 'scipy==1.10.1']
+   install_requires=['transformers==4.38.1', 'peft', 'bitsandbytes', 'scipy==1.10.1']
 )

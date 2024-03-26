@@ -1,3 +1,5 @@
+# https://github.com/microsoft/LoRA/blob/main/loralib/layers.py
+
 import torch
 import torch.nn as nn
 from transformers import PreTrainedModel
@@ -22,7 +24,6 @@ class LoRALayer():
 
 
 class RunLoRALinear(nn.Module, LoRALayer):
-    # TODO: dropout, scaling
     def __init__(
         self,
         in_features: int,
@@ -77,7 +78,11 @@ class RunLoRALinear(nn.Module, LoRALayer):
                 bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
                 nn.init.uniform_(self.bias, -bound, bound)
 
-        nn.init.kaiming_uniform_(self.lora_U, a=math.sqrt(5))
+        # initialized a tensor of size (m, n) can have substantially larger
+        # norm than initialized a tensor of size (n, m)
+        # thus, transposition is added to ensure approximately the same norm
+        # with default peft.lora initialization
+        nn.init.kaiming_uniform_(self.lora_U.T, a=math.sqrt(5))
         nn.init.zeros_(self.lora_V)
 
     # def train(self, mode: bool = True):
@@ -85,9 +90,16 @@ class RunLoRALinear(nn.Module, LoRALayer):
     #     # set lora dropout here to train?
 
     def forward(self, x: torch.Tensor):
-        # TODO: scaling
-        return self.lora_operator.apply(
-            x, self.weight, self.lora_U, self.lora_V, self.bias)
+        # to make consistent with 
+        # result = result.to(torch_result_dtype) (peft implementation)
+        # https://github.com/huggingface/peft/blob/8e979fc73248ccb4c5b5a99c415f3e14a37daae6/src/peft/tuners/lora/layer.py#L514C13-L514C51
+        result_dtype = x.dtype
+        x = x.to(self.lora_U.dtype)
+        # TODO: this is not correct if p_drop > 0
+        # lora_dropout should be applied to x only for A and B
+        result = self.lora_operator.apply(
+            self.lora_dropout(x), self.weight, self.lora_U * self.scaling, self.lora_V, self.bias)
+        return result.to(result_dtype)
 
     def extra_repr(self) -> str:
         return f'in_features={self.in_features}, ' \
@@ -137,24 +149,24 @@ class RunLoRAModel(nn.Module):
             if not any(trgt in module_name for trgt in target_modules):
                 continue
 
-            new_module = RunLoRALinear(
-                module.in_features,
-                module.out_features,
-                run_lora_mapping[module_name],
-                weight=None,
-                bias=module.bias,
-                lora_r=self.lora_r,
-                lora_alpha=self.lora_alpha,
-                lora_dropout=self.lora_dropout,
-            )
-
-            # new_module = RunLoRALinear.from_linear(
-            #     module,
+            # new_module = RunLoRALinear(
+            #     module.in_features,
+            #     module.out_features,
             #     run_lora_mapping[module_name],
+            #     weight=None,
+            #     bias=module.bias,
             #     lora_r=self.lora_r,
             #     lora_alpha=self.lora_alpha,
             #     lora_dropout=self.lora_dropout,
             # )
+
+            new_module = RunLoRALinear.from_linear(
+                module,
+                run_lora_mapping[module_name],
+                lora_r=self.lora_r,
+                lora_alpha=self.lora_alpha,
+                lora_dropout=self.lora_dropout,
+            )
 
             parent = self._get_parent(module_name)
             module_suffix = module_name.split(".")[-1]
