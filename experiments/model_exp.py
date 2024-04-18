@@ -5,7 +5,8 @@ from modeling_llama import LlamaForCausalLM
 from transformers import (
     AutoConfig, 
     AutoModelForCausalLM,
-    OPTForCausalLM
+    OPTForCausalLM,
+    BitsAndBytesConfig
 )
 import torch
 import torch.utils.benchmark as benchmark
@@ -15,6 +16,7 @@ from argparse import ArgumentParser
 import gc
 import pandas as pd
 import os
+import warnings
 import logging
 logging.basicConfig(level=logging.INFO, filemode='w', format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -40,11 +42,19 @@ def parse_args(args):
                         action="extend",
                         nargs="+", type=str,
                         help='list of modules eligible for LoRA adapters')
+    parser.add_argument('--sequence-length',
+                        type=int,
+                        required=False,
+                        help="sequence length of a batch, "
+                             "defaults to model.config.max_sequence_length or model.config.max_position_embeddings")
     parser.add_argument("--criterions",
                         action="extend",
                         nargs="+", type=str,
                         help='criterions for best forward-backward'
                         'pair estimation')
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument('--q4', action='store_true') 
+    group.add_argument('--q8', action='store_true') 
     parser.add_argument('--min-run-time', type=float, default=10.,
                         help='min time in seconds for running consecutive'
                         'experiments in mean runtime estimation')
@@ -74,10 +84,17 @@ def parse_args(args):
         
     assert args.lora_r > 0, "LoRA rank must be positive"
     assert len(args.target_modules) > 0, 'target_modules is empty'
+    if args.q4:
+        bits = '.q4'
+    elif args.q8:
+        bits = '.q8'
+    else:
+        bits = ''
     if not args.out:
         args.out = \
             args.model_name_or_config.split('/')[-1].rstrip('.json') + \
-            f'b{args.batch_size}r{args.lora_r}.{type_string}'
+            f"b{args.batch_size}s{args.sequence_length or 'max'}" \
+            f"r{args.lora_r}.{type_string}{bits}"
 
     return args
 
@@ -90,11 +107,24 @@ def reset_memory(reset_stats=True):
 
 
 def get_model(args):
+    if args.q4 or args.q8:
+        quantization_config = BitsAndBytesConfig(
+            load_in_4bit=args.q4,
+            load_in_8bit=args.q8,
+           # bnb_4bit_quant_type="nf4",
+           # bnb_4bit_use_double_quant=True,
+            bnb_4bit_compute_dtype=args.dtype
+        )
+    else:
+        quantization_config=None
+    
     if os.path.exists(args.model_name_or_config):
         config = AutoConfig.from_pretrained(args.model_name_or_config)
         if 'llama' in args.model_name_or_config:
+            warnings.warn('Llama from config does not support quantization. Use model class from huggingface hub.')
             # Llama with FlashAttention
             model = LlamaForCausalLM(config)
+            model = model.to(args.dtype)
         elif 'opt' in args.model_name_or_config:
             # OPT with FalshAttention
             model = OPTForCausalLM(config, 
@@ -107,15 +137,13 @@ def get_model(args):
             # OPT with FlashAttention
             model = OPTForCausalLM.from_pretrained(args.model_name_or_config, 
                                                    torch_dtype=args.dtype,
-                                                   attn_implementation="flash_attention_2")
+                                                   attn_implementation="flash_attention_2",
+                                                   quantization_config=quantization_config)
         else:
             model = AutoModelForCausalLM.from_pretrained(
                 args.model_name_or_config,
                 torch_dtype=args.dtype,
-                # load_in_8bit=True,
-                # TODO: enable/disable cache?
-                # takes more time but requires less memory
-                # use_cache=False,
+                quantization_config=quantization_config
             )
 
     return model
@@ -129,6 +157,11 @@ def bench_model(model, args):
     if 'roberta' in config._name_or_path:
         # I have no idea, but it doesn't work otherwise
         max_sequence_length -= 2
+    if args.sequence_length:
+        if args.sequence_length > max_sequence_length:
+            raise ValueError('Sequence length can not be larger than maximum sequence length of the model')
+        else:
+            max_sequence_length = args.sequence_length
     
     input_ids = torch.randint(low=0, high=config.vocab_size,
                               size=(args.batch_size, max_sequence_length))
@@ -170,7 +203,8 @@ def bench_model(model, args):
     return {'mean_time_us': measure.mean * 1000000,
             'max_mem_overhead_MB': (max_mem - max_mem_prev) / 2**20,
             'max_mem_res_overhead_MB': (max_res - max_res_prev) / 2**20,
-            'msrs/runs': f'{len(measure.times)}/{measure.number_per_run}'}
+            'msrs/runs': f'{len(measure.times)}/{measure.number_per_run}',
+            'max_sequence_length': max_sequence_length,}
 
 
 def main(args):
@@ -189,8 +223,8 @@ def main(args):
             n_batch=args.batch_size,
             lora_r=args.lora_r,
             target_modules=args.target_modules,
-            criterions=args.criterions)
-    
+            criterions=args.criterions,
+            quant=hasattr(model.config, 'quantization_config'))
 
     del model, run_lora_collection
     reset_memory()
@@ -213,8 +247,10 @@ def main(args):
                              run_lora_mapping[criterion],
                              lora_r=args.lora_r,
                              lora_alpha=args.lora_alpha,
+                             lora_dtype=args.dtype,
                              target_modules=args.target_modules)
-        model = model.to(args.dtype)
+        # this is already done by passing lora_dtype
+        # model = model.to(args.dtype)
         # memory is not immediately cleaned after runlora transform
         reset_memory()
         # print(model)
@@ -230,11 +266,13 @@ def main(args):
             logging.info(f'Total params after RunLoRA transform: {params}, '
                          f'Trainable params after RunLoRA transform: {trainable_params_runlora}')
 
-        assert trainable_params_runlora < trainable_params, \
-            "Number of trainable params after RunLoRA transform increased!"
+        if not(args.q4 or args.q8):
+            assert trainable_params_runlora < trainable_params, \
+                f"Number of trainable params after RunLoRA transform increased from {trainable_params} to {trainable_params_runlora}!"
 
         # for name, param in model.named_parameters():
-        #     print(name, param.requires_grad, param.dtype)
+        #     print(name, param.dtype, param.requires_grad)
+        print(model)
 
         stats = bench_model(model, args)
         rows.append({'criterion': criterion,
@@ -273,12 +311,13 @@ def main(args):
     )
     model = get_peft_model(model, lora_config)
     model = model.to(args.dtype)
+    
     # for name, param in model.named_parameters():
     #     print(name, param.requires_grad, param.dtype)
+    # print(model)
         
     # memory is not immediately cleaned after peft transform
     reset_memory()
-    # print(model)
     if args.verbose:
         logging.info(f'Allocated GPU Memory after loading the model: {torch.cuda.max_memory_allocated() / 2**20} MB')
 
@@ -289,8 +328,9 @@ def main(args):
         logging.info(f'Total params after LoRA transform: {params}, '
                      f'Trainable params after LoRA transform: {trainable_params_lora}')
 
-    assert trainable_params_lora < trainable_params, \
-        "Number of trainable params after LoRA transform increased!"
+    if not (args.q4 or args.q8):
+        assert trainable_params_lora < trainable_params, \
+            f"Number of trainable params after LoRA transform increased from {trainable_params} to {trainable_params_lora}!"
 
     assert trainable_params_lora == trainable_params_runlora, \
         "Number of trainable params after LoRA and RunLoRA transforms do not match!"

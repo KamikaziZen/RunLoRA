@@ -3,6 +3,7 @@ from torch.utils import benchmark
 import torch.nn as nn
 from math import prod
 from collections import defaultdict
+import bitsandbytes.functional as F
 
 
 def timeit_runlora(paths_f, paths_b, X, W, U, V, B, min_run_time=5.):
@@ -10,8 +11,8 @@ def timeit_runlora(paths_f, paths_b, X, W, U, V, B, min_run_time=5.):
     and chooses the best F-B pair for provided dimensions.
 
     Args:
-        paths_f (str): name of forward method
-        paths_b (str): name of backward method
+        paths_f (str): names of forward methods
+        paths_b (str): names of backward methods
         X (torch.Tensor): input to linear layer
         W (torch.Tensor): weights of linear layer
         U (torch.Tensor): first LoRA adapter
@@ -94,10 +95,18 @@ class RunLoRACollection(object):
         self.backward_keys = \
             [i for i in dir(self)
                 if i.startswith("backward") and i[-5:] != "flops"]
+
         self.forward_keys_short = \
             ["forward{}".format(i) for i in range(1, 5)]
         self.backward_keys_short = \
             ["backward{}".format(i) for i in range(1, 9)]
+
+        self.quantforward_keys = \
+            [i for i in dir(self)
+                if i.startswith("quantforward") and i[-5:] != "flops"]
+        self.quantbackward_keys = \
+            [i for i in dir(self)
+                if i.startswith("quantbackward") and i[-5:] != "flops"]
 
         self.flops_benchmarks = {}
         self.time_benchmarks = {}
@@ -107,12 +116,22 @@ class RunLoRACollection(object):
 
     def __getitem__(self, index):
         path_f, path_b = index
-        if path_f not in self.forward_keys:
+        if path_f not in self.forward_keys + self.quantforward_keys:
             raise ValueError("Incorrect path_f")
-        if path_b not in self.backward_keys:
+        if path_b not in self.backward_keys + self.quantbackward_keys:
             raise ValueError("Incorrect path_b")
-        path_f_flops = path_f[:8] + "_flops"
-        path_b_flops = path_b[:9] + "_flops"
+            
+        path_f_flops = path_f.split('_')[0] + "_flops"
+        path_b_flops = path_b.split('_')[0] + "_flops"
+
+        # quantized versions have the same number of flops for multiplications
+        if path_f.startswith('quant'):
+            path_f_flops = path_f_flops.lstrip('quant')
+        if path_b.startswith('quant'):
+            path_b_flops = path_b_flops.lstrip('quant')
+        # path_f_flops = path_f[:8] + "_flops"
+        # path_b_flops = path_b[:9] + "_flops"
+        
         method_forward = getattr(self, path_f)
         method_backward = getattr(self, path_b)
         method_forward_flops = getattr(self, path_f_flops)
@@ -128,7 +147,7 @@ class RunLoRACollection(object):
         return RunLoRA
 
     def optimize_for_model(self, model, n_batch, lora_r,
-                           target_modules, criterions):
+                           target_modules, criterions, quant=False):
         """Optimizes LoRA implementations for a given model.
         For each module specified in target_modules the best 
         forward-backward pair is estimated.
@@ -154,7 +173,6 @@ class RunLoRACollection(object):
             if not any(trgt in module_name for trgt in target_modules):
                 continue
 
-            # is this the best option?
             max_sequence_length = model.config.max_sequence_length if hasattr(model.config, 'max_sequence_length') else model.config.max_position_embeddings
             key = (
                 torch.Size([n_batch, max_sequence_length, module.in_features]), True,
@@ -170,14 +188,14 @@ class RunLoRACollection(object):
                     x = torch.randn(n_batch, max_sequence_length, module.in_features, requires_grad=True)
                     u = torch.randn(module.in_features, lora_r, requires_grad=True)
                     v = torch.randn(lora_r, module.out_features, requires_grad=True)
-                    _ = self.get_best(criterion, x, w, u, v)
+                    _ = self.get_best(criterion, x, w, u, v, quant=quant)
 
                 run_lora_mapping[criterion][module_name] = \
                     self.lookup_best(criterion, key)
 
         return run_lora_mapping
 
-    def get_best_by_flops(self, X, W, U, V, b):
+    def get_best_by_flops(self, X, W, U, V, b, quant=False):
         """Returns names of the best (based on FLOPs estimation) forward
         and backward functions for a given input and parameter dimensions
 
@@ -220,10 +238,16 @@ class RunLoRACollection(object):
                     path_b_index = i
             print()
 
-            self. flops_benchmarks[key] = (
-                self.forward_keys_short[path_f_index],
-                self.backward_keys_short[path_b_index]
-            )
+            if quant:
+                self.flops_benchmarks[key] = (
+                    self.quantforward_keys[path_f_index],
+                    self.quantbackward_keys[path_b_index]
+                )
+            else:
+                self.flops_benchmarks[key] = (
+                    self.forward_keys_short[path_f_index],
+                    self.backward_keys_short[path_b_index]
+                )
 
         return self.flops_benchmarks[key]
 
@@ -287,7 +311,7 @@ class RunLoRACollection(object):
             self.time_benchmarks_short[key] = (path_f, path_b)
         return self.time_benchmarks_short[key]
 
-    def get_best(self, criterion, X, W, U, V, b=None):
+    def get_best(self, criterion, X, W, U, V, b=None, quant=False):
         """Returns class RunLoRA (child of torch.autograd.Function)
         with best forward-backward pair
         (based on criterion and input and parameter dimensions).
@@ -304,7 +328,7 @@ class RunLoRACollection(object):
             class: RunLoRA
         """
         if criterion == "flops":
-            path_f, path_b = self.get_best_by_flops(X, W, U, V, b)
+            path_f, path_b = self.get_best_by_flops(X, W, U, V, b, quant=quant)
         elif criterion == "time":
             path_f, path_b = self.get_best_by_time(X, W, U, V, b)
         elif criterion == "time_short":
@@ -369,11 +393,29 @@ class RunLoRACollection(object):
         X = input.contiguous().view(-1, input.shape[-1])
         Y_shape = torch.Size(list(input.shape[:-1]) + [W.shape[1]])
         __class__.save_context(ctx, input, W, U, V)
-        #ctx.save_for_backward(input, W, U, V, b)
+        
         if b is not None:
             return (b.addmm(X, W).addmm_(X.mm(U), V)).view(Y_shape)
         else:
             return (X.mm(W).addmm_(X.mm(U), V)).view(Y_shape)
+
+    @staticmethod
+    def quantforward1(ctx, input, W, U, V, b):
+        """Y=b+XW+(XU)V save(X,W,U,V)
+        Quantization is based on 
+        https://github.com/TimDettmers/bitsandbytes/blob/054837684e8c4e3ad3ef74919a71b906cde77700/bitsandbytes/autograd/_functions.py#L488"""
+        X = input.contiguous().view(-1, input.shape[-1])
+        W_dequant = F.dequantize_4bit(W, W.quant_state).to(X.dtype)
+        Y_shape = torch.Size(list(input.shape[:-1]) + [W_dequant.shape[1]])
+        
+        __class__.save_context(ctx, input, W, U, V)
+        ctx.quant_state = W.quant_state
+        # ctx.dtype_X, ctx.dtype_bias = X.dtype, None if b is None else b.dtype
+        
+        if b is not None:
+            return (b.addmm(X, W_dequant).addmm_(X.mm(U), V)).view(Y_shape)
+        else:
+            return (X.mm(W_dequant).addmm_(X.mm(U), V)).view(Y_shape)
 
     @staticmethod
     def forward1_flops(input, W, U, V, b):
@@ -405,10 +447,29 @@ class RunLoRACollection(object):
         X = input.contiguous().view(-1, input.shape[-1])
         Y_shape = torch.Size(list(input.shape[:-1]) + [W.shape[1]])
         __class__.save_context(ctx, input, W, U, V)
+        
         if b is not None:
             return b.addmm(X, W.addmm(U, V)).view(Y_shape)
         else:
             return X.mm(W.addmm(U, V)).view(Y_shape)
+
+    @staticmethod
+    def quantforward2(ctx, input, W, U, V, b):
+        """Y=b+X(W+UV) save(X,W,U,V)
+        Quantization is based on 
+        https://github.com/TimDettmers/bitsandbytes/blob/054837684e8c4e3ad3ef74919a71b906cde77700/bitsandbytes/autograd/_functions.py#L488"""
+        X = input.contiguous().view(-1, input.shape[-1])
+        W_dequant = F.dequantize_4bit(W, W.quant_state).to(X.dtype)
+        Y_shape = torch.Size(list(input.shape[:-1]) + [W_dequant.shape[1]])
+        
+        __class__.save_context(ctx, input, W, U, V)
+        ctx.quant_state = W.quant_state
+        # ctx.dtype_X, ctx.dtype_bias = X.dtype, None if b is None else b.dtype
+
+        if b is not None:
+            return b.addmm(X, W_dequant.addmm(U, V)).view(Y_shape)
+        else:
+            return X.mm(W_dequant.addmm(U, V)).view(Y_shape)
 
     @staticmethod
     def forward2_flops(input, W, U, V, b):
@@ -518,6 +579,35 @@ class RunLoRACollection(object):
             grad_input = dY.mm(W.t()).addmm_(Z1, U.t()).view(input.shape)
         if b_req_grad:
             grad_b = dY.sum(axis=0)
+        return grad_input, grad_W, grad_U, grad_V, grad_b
+
+    @staticmethod
+    def quantbackward1(ctx, grad_output):
+        """load(X,W,U,V) Z=dYV'
+        dU=X'Z dV=(XU)'dY dX=dYW'+ZU' db=dY.sum(axis=0)
+        Quantization is based on 
+        https://github.com/TimDettmers/bitsandbytes/blob/054837684e8c4e3ad3ef74919a71b906cde77700/bitsandbytes/autograd/_functions.py#L488"""
+        input, W, U, V = ctx.saved_tensors
+        X = input.contiguous().view(-1, input.shape[-1])
+        dY = grad_output.contiguous().view(-1, grad_output.shape[-1])
+        X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
+            ctx.needs_input_grad
+        grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
+
+        if b_req_grad:
+            grad_b = dY.sum(axis=0)
+
+        if X_req_grad or U_req_grad:
+            Z1 = dY.mm(V.t())
+        if U_req_grad:
+            grad_U = X.t().mm(Z1)
+        if V_req_grad:
+            grad_V = (X.mm(U)).t().mm(dY)
+
+        if X_req_grad:
+            W_dequantize = F.dequantize_4bit(W, ctx.quant_state).to(dY.dtype)
+            grad_input = dY.mm(W_dequantize.t()).addmm_(Z1, U.t()).view(input.shape)
+
         return grad_input, grad_W, grad_U, grad_V, grad_b
 
     @staticmethod
@@ -771,6 +861,35 @@ class RunLoRACollection(object):
             grad_input = dY.mm(W.t()).addmm_(Z1, U.t()).view(input.shape)
         if b_req_grad:
             grad_b = dY.sum(axis=0)
+        return grad_input, grad_W, grad_U, grad_V, grad_b
+
+    @staticmethod
+    def quantbackward2(ctx, grad_output):
+        """load(X,W,U,V) Z=dYV'
+        dU=X'Z dV=U'X'dY dX=dYW'.addmm(Z,U') db=dY.sum(axis=0)
+        Quantization is based on 
+        https://github.com/TimDettmers/bitsandbytes/blob/054837684e8c4e3ad3ef74919a71b906cde77700/bitsandbytes/autograd/_functions.py#L488"""
+        input, W, U, V = ctx.saved_tensors
+        X = input.contiguous().view(-1, input.shape[-1])
+        dY = grad_output.contiguous().view(-1, grad_output.shape[-1])
+        X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
+            ctx.needs_input_grad
+        grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
+
+        if b_req_grad:
+            grad_b = dY.sum(axis=0)
+
+        if X_req_grad or U_req_grad:
+            Z1 = dY.mm(V.t())
+        if U_req_grad:
+            grad_U = X.t().mm(Z1)
+        if V_req_grad:
+            grad_V = U.t().mm(X.t().mm(dY))
+
+        if X_req_grad:
+            W_dequantize = F.dequantize_4bit(W, ctx.quant_state).to(dY.dtype)
+            grad_input = dY.mm(W_dequantize.t()).addmm_(Z1, U.t()).view(input.shape)
+
         return grad_input, grad_W, grad_U, grad_V, grad_b
 
     @staticmethod
@@ -1290,6 +1409,35 @@ class RunLoRACollection(object):
         return grad_input, grad_W, grad_U, grad_V, grad_b
 
     @staticmethod
+    def quantbackward3(ctx, grad_output):
+        """load(X,W,U,V) Z1=dYV' Z2=X'dY
+        dU=Z2V' dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)
+        Quantization is based on 
+        https://github.com/TimDettmers/bitsandbytes/blob/054837684e8c4e3ad3ef74919a71b906cde77700/bitsandbytes/autograd/_functions.py#L488"""
+        input, W, U, V = ctx.saved_tensors
+        X = input.contiguous().view(-1, input.shape[-1])
+        dY = grad_output.contiguous().view(-1, grad_output.shape[-1])
+        X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
+            ctx.needs_input_grad
+        grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
+
+        if b_req_grad:
+            grad_b = dY.sum(axis=0)
+
+        if U_req_grad or V_req_grad:
+            Z = X.t().mm(dY)
+        if U_req_grad:
+            grad_U = Z.mm(V.t())
+        if V_req_grad:
+            grad_V = (U.t()).mm(Z)
+
+        if X_req_grad:
+            W_dequantize = F.dequantize_4bit(W, ctx.quant_state).to(dY.dtype)
+            grad_input = dY.mm(W_dequantize.t()).addmm_(dY.mm(V.t()), U.t()).view(input.shape)
+
+        return grad_input, grad_W, grad_U, grad_V, grad_b
+
+    @staticmethod
     def backward3_X_dY_Z1_Z2(ctx, grad_output):
         """load(X,W,U,V) Z1=dYV' Z2=X'dY
         dU=Z2V' dV=U'Z2 dX=dYW'+Z1U' db=dY.sum(axis=0)"""
@@ -1607,6 +1755,35 @@ class RunLoRACollection(object):
         return grad_input, grad_W, grad_U, grad_V, grad_b
 
     @staticmethod
+    def quantbackward4(ctx, grad_output):
+        """load(X,W,U,V) Z1=W+UV Z2=X'dY
+        dU=Z2V' dV=U'Z2 dX=dYZ1' db=dY.sum(axis=0)
+        Quantization is based on 
+        https://github.com/TimDettmers/bitsandbytes/blob/054837684e8c4e3ad3ef74919a71b906cde77700/bitsandbytes/autograd/_functions.py#L488"""
+        input, W, U, V = ctx.saved_tensors
+        X = input.contiguous().view(-1, input.shape[-1])
+        dY = grad_output.contiguous().view(-1, grad_output.shape[-1])
+        X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
+            ctx.needs_input_grad
+        grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
+
+        if b_req_grad:
+            grad_b = dY.sum(axis=0)
+
+        if U_req_grad or V_req_grad:
+            Z = X.t().mm(dY)
+        if U_req_grad:
+            grad_U = Z.mm(V.t())
+        if V_req_grad:
+            grad_V = (U.t()).mm(Z)
+
+        if X_req_grad:
+            W_dequantize = F.dequantize_4bit(W, ctx.quant_state).to(dY.dtype)
+            grad_input = dY.mm((W_dequantize.addmm(U, V)).t()).view(input.shape)
+
+        return grad_input, grad_W, grad_U, grad_V, grad_b
+
+    @staticmethod
     def backward4_X_Z1_dY_Z2(ctx, grad_output):
         """load(X,W,U,V) Z1=W+UV Z2=X'dY
         dU=Z2V' dV=U'Z2 dX=dYZ1' db=dY.sum(axis=0)"""
@@ -1751,6 +1928,33 @@ class RunLoRACollection(object):
             grad_input = dY.mm((W.addmm(U, V)).t()).view(input.shape)
         if b_req_grad:
             grad_b = dY.sum(axis=0)
+        return grad_input, grad_W, grad_U, grad_V, grad_b
+
+    @staticmethod
+    def quantbackward5(ctx, grad_output):
+        """load(X,W,U,V) Z1=dYV' Z2=XU Z3=W+UV
+        dU=X'Z1 dV=Z2'dY dX=dYZ3' db=dY.sum(axis=0)
+        Quantization is based on 
+        https://github.com/TimDettmers/bitsandbytes/blob/054837684e8c4e3ad3ef74919a71b906cde77700/bitsandbytes/autograd/_functions.py#L488"""
+        input, W, U, V = ctx.saved_tensors
+        X = input.contiguous().view(-1, input.shape[-1])
+        dY = grad_output.contiguous().view(-1, grad_output.shape[-1])
+        X_req_grad, W_req_grad, U_req_grad, V_req_grad, b_req_grad = \
+            ctx.needs_input_grad
+        grad_input, grad_W, grad_U, grad_V, grad_b = [None] * 5
+
+        if b_req_grad:
+            grad_b = dY.sum(axis=0)
+
+        if U_req_grad:
+            grad_U = X.t().mm(dY.mm(V.t()))
+        if V_req_grad:
+            grad_V = (X.mm(U)).t().mm(dY)
+
+        if X_req_grad:
+            W_dequantize = F.dequantize_4bit(W, ctx.quant_state).to(dY.dtype)
+            grad_input = dY.mm((W_dequantize.addmm(U, V)).t()).view(input.shape)
+
         return grad_input, grad_W, grad_U, grad_V, grad_b
 
     @staticmethod

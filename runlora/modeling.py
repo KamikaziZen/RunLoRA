@@ -5,6 +5,7 @@ import torch.nn as nn
 from transformers import PreTrainedModel
 from typing import List
 import math
+import bitsandbytes as bnb
 
 
 class LoRALayer():
@@ -29,12 +30,15 @@ class RunLoRALinear(nn.Module, LoRALayer):
         in_features: int,
         out_features: int,
         lora_operator,
+        quantization_config,
         lora_r: int,
         lora_alpha: int,
+        device=None,
+        dtype=None,
         lora_dropout: float = 0.,
         weight=None,
         bias=None,
-        keep_original=False
+        keep_original=False,
     ):
         assert lora_r > 0, 'LoRA rank must be positive'
 
@@ -46,21 +50,42 @@ class RunLoRALinear(nn.Module, LoRALayer):
         self.out_features = out_features
         self.keep_original = keep_original
 
-        # transponent to usual torch.Linear weights
-        self.weight = nn.Parameter(torch.empty((in_features, out_features)),
-                                   # Freezing the pre-trained weight matrix
-                                   requires_grad=False)
-        if weight is not None:
-            self.weight.data = weight.data.detach().t()
+        if weight is None:
+            weight_data = torch.empty(in_features, out_features, dtype=dtype, device=device)
+        else:
+            weight_data = weight.data.detach().t()
+
+        if not quantization_config:
+            # runlora weight is transponent to usual torch.Linear weights
+            # weight_data = weight_data.t()
+            self.weight = nn.Parameter(weight_data,
+                                       # Freezing the pre-trained weight matrix
+                                       requires_grad=False)
+        elif quantization_config.load_in_4bit:
+            self.weight = bnb.nn.Params4bit(
+                weight_data,
+                requires_grad=False,
+                quant_state = weight.quant_state,
+                compress_statistics=quantization_config.bnb_4bit_use_double_quant,
+                quant_type=quantization_config.bnb_4bit_quant_type,
+            )
+        elif quantization_config.load_in_8bit:
+            self.weight = bnb.nn.Int8Params(
+                weight_data,
+                requires_grad=False,
+            )
+        else:
+            raise ValueError("Wrong format of quantization config")
+
         if bias is not None:
-            self.bias = nn.Parameter(torch.empty(out_features),
+            self.bias = nn.Parameter(torch.empty(out_features, device=device, dtype=dtype),
                                      requires_grad=False)
             self.bias.data = bias.data.detach()
         else:
             self.register_parameter('bias', None)
 
-        self.lora_U = nn.Parameter(torch.empty((in_features, lora_r)))
-        self.lora_V = nn.Parameter(torch.empty((lora_r, out_features)))
+        self.lora_U = nn.Parameter(torch.empty((in_features, lora_r), dtype=dtype, device=device))
+        self.lora_V = nn.Parameter(torch.empty((lora_r, out_features), dtype=dtype, device=device))
         self.scaling = self.lora_alpha / self.lora_r
 
         # Initializing weights
@@ -70,18 +95,19 @@ class RunLoRALinear(nn.Module, LoRALayer):
         self.lora_operator = lora_operator
 
     def reset_parameters(self):
+        # initialized a tensor of size (m, n) can have substantially larger
+        # norm than initialized a tensor of size (n, m)
+        # thus, transposition is added to W and U init
+        # to ensure approximately the same norm
+        # with default peft.lora initialization
         if not self.keep_original:
-            nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+            nn.init.kaiming_uniform_(self.weight.T, a=math.sqrt(5))
             # TODO: get rid of fan_in, fan_out?
             if self.bias is not None:
                 fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.weight)
                 bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
                 nn.init.uniform_(self.bias, -bound, bound)
 
-        # initialized a tensor of size (m, n) can have substantially larger
-        # norm than initialized a tensor of size (n, m)
-        # thus, transposition is added to ensure approximately the same norm
-        # with default peft.lora initialization
         nn.init.kaiming_uniform_(self.lora_U.T, a=math.sqrt(5))
         nn.init.zeros_(self.lora_V)
 
@@ -108,7 +134,8 @@ class RunLoRALinear(nn.Module, LoRALayer):
                f'lora_r={self.lora_r}, ' \
                f'lora_alpha={self.lora_alpha}, ' \
                f'forward={self.lora_operator.forward.__name__}, ' \
-               f'backward={self.lora_operator.backward.__name__}'
+               f'backward={self.lora_operator.backward.__name__}, ' \
+               f'weight_dtype={self.weight.dtype}'
 
     @classmethod
     def from_linear(cls, module, lora_operator, **kwargs):
@@ -130,6 +157,7 @@ class RunLoRAModel(nn.Module):
                  target_modules: List[str],
                  lora_r: int,
                  lora_alpha: int,
+                 lora_dtype,
                  lora_dropout: float = 0.):
 
         super().__init__()
@@ -139,6 +167,7 @@ class RunLoRAModel(nn.Module):
         self.lora_r = lora_r
         self.lora_alpha = lora_alpha
         self.lora_dropout = lora_dropout
+        self.device = model.device
 
         self.forward = self.base_model.forward
 
@@ -158,6 +187,7 @@ class RunLoRAModel(nn.Module):
             #     lora_r=self.lora_r,
             #     lora_alpha=self.lora_alpha,
             #     lora_dropout=self.lora_dropout,
+            #     quantization_config=self.config.quantization_config
             # )
 
             new_module = RunLoRALinear.from_linear(
@@ -166,6 +196,9 @@ class RunLoRAModel(nn.Module):
                 lora_r=self.lora_r,
                 lora_alpha=self.lora_alpha,
                 lora_dropout=self.lora_dropout,
+                quantization_config=self.config.quantization_config if hasattr(self.config, 'quantization_config') else None,
+                device=self.device,
+                dtype=lora_dtype
             )
 
             parent = self._get_parent(module_name)
