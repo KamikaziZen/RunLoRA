@@ -224,7 +224,8 @@ def main(args):
             lora_r=args.lora_r,
             target_modules=args.target_modules,
             criterions=args.criterions,
-            quant=hasattr(model.config, 'quantization_config'))
+            quant=hasattr(model.config, 'quantization_config'), 
+            sequence_length=args.sequence_length)
 
     del model, run_lora_collection
     reset_memory()
@@ -249,8 +250,10 @@ def main(args):
                              lora_alpha=args.lora_alpha,
                              lora_dtype=args.dtype,
                              target_modules=args.target_modules)
+        
         # this is already done by passing lora_dtype
         # model = model.to(args.dtype)
+        
         # memory is not immediately cleaned after runlora transform
         reset_memory()
         # print(model)

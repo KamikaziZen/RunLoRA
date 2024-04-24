@@ -146,8 +146,8 @@ class RunLoRACollection(object):
                        + method_backward_flops(input, W, U, V, b)
         return RunLoRA
 
-    def optimize_for_model(self, model, n_batch, lora_r,
-                           target_modules, criterions, quant=False):
+    def optimize_for_model(self, model, n_batch, lora_r, target_modules, 
+                           criterions, sequence_length=None, quant=False):
         """Optimizes LoRA implementations for a given model.
         For each module specified in target_modules the best 
         forward-backward pair is estimated.
@@ -174,6 +174,9 @@ class RunLoRACollection(object):
                 continue
 
             max_sequence_length = model.config.max_sequence_length if hasattr(model.config, 'max_sequence_length') else model.config.max_position_embeddings
+            if sequence_length:
+                max_sequence_length = sequence_length
+            
             key = (
                 torch.Size([n_batch, max_sequence_length, module.in_features]), True,
                 torch.Size([module.in_features, module.out_features]), False,
