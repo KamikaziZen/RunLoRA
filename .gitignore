@@ -1,5 +1,7 @@
 # Custom
 models/
+img/
+results/
 *.csv
 *.png
 *.scheme
