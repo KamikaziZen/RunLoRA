@@ -3,7 +3,7 @@
 import torch
 import torch.nn as nn
 from transformers import PreTrainedModel
-from typing import List
+from typing import List, Any
 import math
 import bitsandbytes as bnb
 
@@ -53,7 +53,7 @@ class RunLoRALinear(nn.Module, LoRALayer):
         if weight is None:
             weight_data = torch.empty(in_features, out_features, dtype=dtype, device=device)
         else:
-            weight_data = weight.data.detach().t()
+            weight_data = weight.data.detach().t().contiguous()
 
         if not quantization_config:
             # runlora weight is transponent to usual torch.Linear weights
@@ -80,12 +80,14 @@ class RunLoRALinear(nn.Module, LoRALayer):
         if bias is not None:
             self.bias = nn.Parameter(torch.empty(out_features, device=device, dtype=dtype),
                                      requires_grad=False)
-            self.bias.data = bias.data.detach()
+            self.bias.data = bias.data.detach().contiguous()
         else:
             self.register_parameter('bias', None)
 
-        self.lora_U = nn.Parameter(torch.empty((in_features, lora_r), dtype=dtype, device=device))
-        self.lora_V = nn.Parameter(torch.empty((lora_r, out_features), dtype=dtype, device=device))
+        self.lora_U = nn.Parameter(
+            torch.empty((in_features, lora_r), dtype=dtype, device=device))
+        self.lora_V = nn.Parameter(
+            torch.empty((lora_r, out_features), dtype=dtype, device=device))
         self.scaling = self.lora_alpha / self.lora_r
 
         # Initializing weights
@@ -115,16 +117,23 @@ class RunLoRALinear(nn.Module, LoRALayer):
     #     nn.Linear.train(self, mode)
     #     # set lora dropout here to train?
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor, *args: Any, **kwargs: Any):
         # to make consistent with 
+        # x = x.to(lora_A.weight.dtype)
         # result = result.to(torch_result_dtype) (peft implementation)
         # https://github.com/huggingface/peft/blob/8e979fc73248ccb4c5b5a99c415f3e14a37daae6/src/peft/tuners/lora/layer.py#L514C13-L514C51
-        result_dtype = x.dtype
-        x = x.to(self.lora_U.dtype)
+        if x.dtype in (torch.bfloat16, torch.half):
+            result_dtype = x.dtype
+        else:
+            result_dtype = self.weight.dtype
+        # x = x.to(self.lora_U.dtype)
         # TODO: this is not correct if p_drop > 0
         # lora_dropout should be applied to x only for A and B
+        # result = self.lora_operator.apply(
+        #     self.lora_dropout(x), self.weight, self.lora_U * self.scaling, self.lora_V, self.bias)
         result = self.lora_operator.apply(
-            self.lora_dropout(x), self.weight, self.lora_U * self.scaling, self.lora_V, self.bias)
+            x, self.weight, self.lora_U * self.scaling, self.lora_V, self.bias)
+        # return result
         return result.to(result_dtype)
 
     def extra_repr(self) -> str:
@@ -211,9 +220,11 @@ class RunLoRAModel(nn.Module):
         parent = self.base_model.get_submodule(parent_name)
         return parent
 
-    def prepare_for_finetuning(self):
+    def prepare_for_finetuning(self, modules_to_save=None):
         for name, param in self.base_model.named_parameters():
             if "lora_" in name:
+                param.requires_grad = True
+            elif modules_to_save and any(m in name for m in modules_to_save):
                 param.requires_grad = True
             else:
                 param.requires_grad = False
