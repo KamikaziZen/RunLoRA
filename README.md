@@ -12,9 +12,11 @@ python3 experiments/model_exp.py -m configs/llama_60m.json \
         --criterions flops --n_batch 10 --min_run_time 20 -r 8 --dtype 'bf16'
 ```
 
-or just use the ExperimentLauncher.ipynb notebook to run the experiments featured in the paper. 
+or just use the ExperimentLauncher notebook to run the experiments featured in the paper. 
+
+For experiments on visual transformer models, use BenchmarkViT and FineTuneViT_RunLoRA notebooks.
 
 ## Results
 
-<img src="./img/comparison.png">
+<img src="comparison.PNG">
 
